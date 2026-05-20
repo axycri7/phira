@@ -38,7 +38,7 @@ use std::{
     process::{Command, Stdio},
     rc::Rc,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tracing::{debug, warn};
 
@@ -452,22 +452,17 @@ impl GameScene {
     }
 
     pub async fn load_chart(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<(Chart, Vec<u8>, ChartFormat)> {
-        let total_start = Instant::now();
-        tracing::info!(chart = %info.chart, "chart load started");
         let extra_source = fs.load_file("extra.json").await.ok().map(String::from_utf8).transpose()?;
         let extra = if let Some(extra) = extra_source.as_deref() {
             parse_extra(extra, fs).await.context("Failed to parse extra")?
         } else {
             ChartExtra::default()
         };
-        let source_start = Instant::now();
         let bytes = Self::load_chart_bytes(fs, info).await.context("Failed to load chart")?;
-        let source_load_ms = source_start.elapsed().as_secs_f32() * 1000.;
         let format = Self::infer_chart_format(info, &bytes);
         let options = ParseOptions {
             use_rpe_170_speed: info.use_rpe_170_speed.unwrap_or_default(),
         };
-        let parse_start = Instant::now();
         let cache_path = (format != ChartFormat::Pbc).then(|| Self::pbc_cache_path(&format, &bytes, extra_source.as_deref(), options));
         let mut chart = if let Some(cache_path) = cache_path.as_deref() {
             if let Some(cache_bytes) = Self::load_pbc_cache(fs, cache_path).await {
@@ -497,19 +492,8 @@ impl GameScene {
         if format == ChartFormat::Pbc {
             Self::load_custom_hitsounds(&mut chart, fs).await?;
         }
-        let parse_ms = parse_start.elapsed().as_secs_f32() * 1000.;
-        let texture_start = Instant::now();
         chart.load_textures(fs).await?;
-        let texture_load_ms = texture_start.elapsed().as_secs_f32() * 1000.;
         chart.settings.hold_partial_cover = info.hold_partial_cover;
-        let total_ms = total_start.elapsed().as_secs_f32() * 1000.;
-        tracing::info!(
-            total_ms,
-            source_load_ms,
-            parse_ms,
-            texture_load_ms,
-            "chart load finished"
-        );
         Ok((chart, bytes, format))
     }
 
@@ -1183,7 +1167,6 @@ impl Scene for GameScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
-        let _span = tracing::trace_span!("game_update").entered();
         self.res.audio.recover_if_needed()?;
         if matches!(self.state, State::Playing) {
             tm.update(self.music.position());
@@ -1335,10 +1318,8 @@ impl Scene for GameScene {
         self.res.time = time;
         if !tm.paused() && self.pause_rewind.is_none() && self.mode != GameMode::View {
             self.gl.quad_gl.viewport(self.res.camera.viewport);
-            let _span = tracing::trace_span!("judge_update").entered();
             self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes);
             self.gl.quad_gl.viewport(None);
-            drop(_span);
         }
         if let Some(update) = &mut self.update_fn {
             update(self.res.time, &mut self.res, &mut self.judge);
@@ -1455,8 +1436,6 @@ impl Scene for GameScene {
     }
 
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
-        let _span = tracing::trace_span!("game_render").entered();
-
         if self.res.config.show_avg_fps {
             let current_time = tm.real_time();
             if matches!(self.state, State::Playing) && !tm.paused() {
@@ -1537,7 +1516,6 @@ impl Scene for GameScene {
         }
 
         if !self.res.no_effect && !self.effects.is_empty() {
-            let _span = tracing::trace_span!("post_effect_render").entered();
             push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp),

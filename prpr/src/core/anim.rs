@@ -91,6 +91,13 @@ impl<T: Tweenable> Anim<T> {
             self.time = time;
             return;
         }
+        if self.keyframes.len() == 1 {
+            self.time = time;
+            if let Some(next) = &mut self.next {
+                next.set_time(time);
+            }
+            return;
+        }
         while let Some(kf) = self.keyframes.get(self.cursor + 1) {
             if kf.time > time {
                 break;
@@ -121,13 +128,15 @@ impl<T: Tweenable> Anim<T> {
     }
 
     pub fn now_opt(&self) -> Option<T> {
-        self.now_opt_inner().map(|now| {
-            if let Some(next) = &self.next {
-                T::add(&now, &next.now_opt().unwrap())
-            } else {
-                now
+        let mut value = self.now_opt_inner()?;
+        let mut next = &self.next;
+        while let Some(anim) = next {
+            if let Some(next_value) = anim.now_opt_inner() {
+                value = T::add(&value, &next_value);
             }
-        })
+            next = &anim.next;
+        }
+        Some(value)
     }
 
     pub fn map_value(&mut self, mut f: impl FnMut(T) -> T) {
@@ -164,5 +173,35 @@ impl AnimVector {
 
     pub fn now_with_def(&self, x: f32, y: f32) -> Vector {
         Vector::new(self.0.now_opt().unwrap_or(x), self.1.now_opt().unwrap_or(y))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_anim_can_seek_without_changing_value() {
+        let mut anim = AnimFloat::fixed(3.5);
+        anim.set_time(10.0);
+        assert_eq!(anim.now(), 3.5);
+        assert_eq!(anim.cursor, 0);
+    }
+
+    #[test]
+    fn default_anim_has_no_value() {
+        let mut anim = AnimFloat::default();
+        anim.set_time(10.0);
+        assert_eq!(anim.now_opt(), None);
+        assert!(anim.is_default());
+    }
+
+    #[test]
+    fn chained_now_opt_skips_default_segments() {
+        let mut anim = AnimFloat::fixed(2.0);
+        anim.next = Some(Box::new(AnimFloat::default()));
+        anim.next.as_mut().unwrap().next = Some(Box::new(AnimFloat::fixed(3.0)));
+
+        assert_eq!(anim.now_opt(), Some(5.0));
     }
 }

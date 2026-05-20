@@ -1,16 +1,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use prpr::{
-    bin::{BinaryReader, BinaryWriter},
+    bin::BinaryWriter,
     core::ChartExtra,
     fs::FileSystem,
-    info::ChartFormat,
-    parse::{parse_pec, parse_phigros, parse_rpe},
+    parse::{infer_chart_format_bytes, parse_chart_bytes, ParseOptions},
 };
 use std::{
     any::Any,
     fs::File,
-    io::{BufWriter, Cursor},
+    io::BufWriter,
 };
 
 const HELP: &str = "
@@ -66,31 +65,11 @@ fn main() -> Result<()> {
     let output = output.ok_or_else(|| anyhow!("Missing output"))?;
 
     let bytes = std::fs::read(input).context("Failed to read chart")?;
-    let format = if let Ok(text) = String::from_utf8(bytes.clone()) {
-        if text.starts_with('{') {
-            if text.contains("\"META\"") {
-                ChartFormat::Rpe
-            } else {
-                ChartFormat::Pgr
-            }
-        } else {
-            ChartFormat::Pec
-        }
-    } else {
-        ChartFormat::Pbc
-    };
+    let format = infer_chart_format_bytes(None, &bytes);
 
     let mut fs = Box::new(DummyFileSystem);
     let extra = ChartExtra::default();
-    let chart = match format {
-        ChartFormat::Rpe => pollster::block_on(parse_rpe(&String::from_utf8_lossy(&bytes), fs.as_mut(), extra, false)),
-        ChartFormat::Pgr => parse_phigros(&String::from_utf8_lossy(&bytes), extra),
-        ChartFormat::Pec => parse_pec(&String::from_utf8_lossy(&bytes), extra),
-        ChartFormat::Pbc => {
-            let mut r = BinaryReader::new(Cursor::new(&bytes));
-            r.read()
-        }
-    }?;
+    let chart = pollster::block_on(parse_chart_bytes(&bytes, format, fs.as_mut(), extra, ParseOptions::default()))?;
 
     let output = BufWriter::new(File::create(output)?);
     let mut w = BinaryWriter::new(output);
