@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     ops::DerefMut,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
 };
 use tracing::{debug, warn};
@@ -172,6 +172,12 @@ impl Data {
             *entry = (*entry + 1).min(MAX_IMPORT_RETRIES);
         }
 
+        struct ImportCandidate {
+            path: PathBuf,
+            local_path: String,
+            id: Option<i32>,
+        }
+
         let collections = dir::collections()?;
         for col in self.collections_legacy.drain(..) {
             let uuid = Uuid::new_v4();
@@ -192,6 +198,7 @@ impl Data {
         let charts = dir::charts()?;
         self.charts.retain(|it| Path::new(&format!("{}/{}", charts, it.local_path)).exists());
         let occurred: HashSet<_> = self.charts.iter().map(|it| it.local_path.clone()).collect();
+        let mut candidates = Vec::new();
         for entry in std::fs::read_dir(dir::custom_charts()?)? {
             let entry = entry?;
             let filename = entry.file_name();
@@ -208,28 +215,11 @@ impl Data {
                 warn!("skip startup import scan after retry limit reached: {filename}");
                 continue;
             }
-            // Persist retry count before parsing so crashes during parsing still consume one retry.
-            bump_retry(&mut self.import_scan_retry, &filename);
-            persist_retry_state(self);
-            let Ok(mut fs) = prpr::fs::fs_from_file(&path) else {
-                continue;
-            };
-            let result = prpr::fs::load_info(fs.deref_mut()).await;
-            match result {
-                Ok(info) => {
-                    self.import_scan_retry.remove(&filename);
-                    self.charts.push(LocalChart {
-                        info: BriefChartInfo { id: None, ..info.into() },
-                        local_path: filename,
-                        record: None,
-                        mods: Mods::default(),
-                        played_unlock: false,
-                    });
-                }
-                Err(err) => {
-                    warn!(?err, "failed to parse startup custom import candidate: {}", filename);
-                }
-            }
+            candidates.push(ImportCandidate {
+                path,
+                local_path: filename,
+                id: None,
+            });
         }
         for entry in std::fs::read_dir(dir::downloaded_charts()?)? {
             let entry = entry?;
@@ -248,27 +238,40 @@ impl Data {
                 warn!("skip startup import scan after retry limit reached: {filename}");
                 continue;
             }
+            candidates.push(ImportCandidate {
+                path,
+                local_path: filename,
+                id: Some(id),
+            });
+        }
+        if !candidates.is_empty() {
             // Persist retry count before parsing so crashes during parsing still consume one retry.
-            bump_retry(&mut self.import_scan_retry, &filename);
+            for candidate in &candidates {
+                bump_retry(&mut self.import_scan_retry, &candidate.local_path);
+            }
             persist_retry_state(self);
-            let Ok(mut fs) = prpr::fs::fs_from_file(&path) else {
-                warn!("failed to open file system for downloaded chart: {}", filename);
+        }
+        for candidate in candidates {
+            let Ok(mut fs) = prpr::fs::fs_from_file(&candidate.path) else {
+                if candidate.id.is_some() {
+                    warn!("failed to open file system for downloaded chart: {}", candidate.local_path);
+                }
                 continue;
             };
             let result = prpr::fs::load_info(fs.deref_mut()).await;
             match result {
                 Ok(info) => {
-                    self.import_scan_retry.remove(&filename);
+                    self.import_scan_retry.remove(&candidate.local_path);
                     self.charts.push(LocalChart {
-                        info: BriefChartInfo { id: Some(id), ..info.into() },
-                        local_path: filename,
+                        info: BriefChartInfo { id: candidate.id, ..info.into() },
+                        local_path: candidate.local_path,
                         record: None,
                         mods: Mods::default(),
                         played_unlock: false,
                     });
                 }
                 Err(err) => {
-                    warn!(?err, "failed to parse startup downloaded import candidate: {}", filename);
+                    warn!(?err, "failed to parse startup import candidate: {}", candidate.local_path);
                 }
             }
         }
