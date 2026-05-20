@@ -83,11 +83,17 @@ pub enum JudgeLineKind {
 }
 
 #[derive(Clone)]
+struct NoteGroup {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone)]
 pub struct JudgeLineCache {
     update_order: Vec<u32>,
     not_plain_count: usize,
-    above_indices: Vec<usize>,
-    below_indices: Vec<usize>,
+    above_groups: Vec<NoteGroup>,
+    below_groups: Vec<NoteGroup>,
 }
 
 impl JudgeLineCache {
@@ -97,8 +103,8 @@ impl JudgeLineCache {
         let mut res = Self {
             update_order: Vec::new(),
             not_plain_count: 0,
-            above_indices: Vec::new(),
-            below_indices: Vec::new(),
+            above_groups: Vec::new(),
+            below_groups: Vec::new(),
         };
         res.reset(notes);
         res
@@ -106,12 +112,12 @@ impl JudgeLineCache {
 
     pub(crate) fn reset(&mut self, notes: &mut [Note]) {
         self.update_order = (0..notes.len() as u32).collect();
-        self.above_indices.clear();
-        self.below_indices.clear();
+        self.above_groups.clear();
+        self.below_groups.clear();
         let mut index = notes.iter().position(|it| it.plain()).unwrap_or(notes.len());
         self.not_plain_count = index;
         while notes.get(index).is_some_and(|it| it.above) {
-            self.above_indices.push(index);
+            let start = index;
             let speed = notes[index].speed;
             loop {
                 index += 1;
@@ -119,9 +125,10 @@ impl JudgeLineCache {
                     break;
                 }
             }
+            self.above_groups.push(NoteGroup { start, end: index });
         }
         while index != notes.len() {
-            self.below_indices.push(index);
+            let start = index;
             let speed = notes[index].speed;
             loop {
                 index += 1;
@@ -129,7 +136,21 @@ impl JudgeLineCache {
                     break;
                 }
             }
+            self.below_groups.push(NoteGroup { start, end: index });
         }
+    }
+
+    fn advance_visible_groups(&mut self, notes: &[Note]) {
+        fn advance(groups: &mut Vec<NoteGroup>, notes: &[Note]) {
+            groups.retain_mut(|group| {
+                while group.start < group.end && matches!(notes[group.start].judge, JudgeStatus::Judged) {
+                    group.start += 1;
+                }
+                group.start < group.end
+            });
+        }
+        advance(&mut self.above_groups, notes);
+        advance(&mut self.below_groups, notes);
     }
 }
 
@@ -158,14 +179,12 @@ pub struct JudgeLine {
 }
 
 impl JudgeLine {
-    pub fn update(&mut self, res: &mut Resource, tr: Matrix, parent_rot: f32) {
+    pub fn update(&mut self, res: &mut Resource, tr: Matrix, parent_rot: f32, line_height: f64) {
         // self.object.set_time(res.time); // this is done by chart, chart has to calculate transform for us
-        self.height.set_time(res.time);
-        let line_height = self.height.now();
         let mut ctrl_obj = self.ctrl_obj.borrow_mut();
         self.cache.update_order.retain(|id| {
             let note = &mut self.notes[*id as usize];
-            note.update(res, parent_rot, &tr, &mut ctrl_obj, line_height as f64);
+            note.update(res, parent_rot, &tr, &mut ctrl_obj, line_height);
             !note.dead()
         });
         drop(ctrl_obj);
@@ -182,30 +201,7 @@ impl JudgeLine {
             _ => {}
         }
         self.color.set_time(res.time);
-        self.cache.above_indices.retain_mut(|index| {
-            while matches!(self.notes[*index].judge, JudgeStatus::Judged) {
-                if self
-                    .notes
-                    .get(*index + 1)
-                    .is_some_and(|it| it.above && it.speed == self.notes[*index].speed)
-                {
-                    *index += 1;
-                } else {
-                    return false;
-                }
-            }
-            true
-        });
-        self.cache.below_indices.retain_mut(|index| {
-            while matches!(self.notes[*index].judge, JudgeStatus::Judged) {
-                if self.notes.get(*index + 1).is_some_and(|it| it.speed == self.notes[*index].speed) {
-                    *index += 1;
-                } else {
-                    return false;
-                }
-            }
-            true
-        });
+        self.cache.advance_visible_groups(&self.notes);
     }
 
     pub fn fetch_rot(&self, lines: &[JudgeLine]) -> f32 {
@@ -233,11 +229,22 @@ impl JudgeLine {
             .append_translation(&self.fetch_pos(res, lines))
     }
 
-    pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
+    pub fn render(
+        &self,
+        ui: &mut Ui,
+        res: &mut Resource,
+        _lines: &[JudgeLine],
+        bpm_list: &mut BpmList,
+        settings: &ChartSettings,
+        id: usize,
+        transform: Matrix,
+        line_height: f64,
+    ) {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
+        let visible_alpha = alpha.max(0.0);
         let color = self.color.now_opt();
         let line_scaled = (self.object.scale.1.now() - 1.).abs() > 1e-4;
-        res.with_model(self.now_transform(res, lines), |res| {
+        res.with_model(transform, |res| {
             if res.config.chart_debug {
                 res.apply_model(|_| {
                     ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.8).draw();
@@ -247,14 +254,17 @@ impl JudgeLine {
                 res.apply_model(|res| match &self.kind {
                     JudgeLineKind::Normal => {
                         let mut color = color.unwrap_or(res.judge_line_color);
-                        color.a *= alpha.max(0.0);
+                        color.a *= visible_alpha;
+                        if color.a <= 0.001 {
+                            return;
+                        }
                         let len = res.info.line_length;
                         draw_line(-len, 0., len, 0., if line_scaled { 0.0076 } else { 0.01 }, color);
                     }
                     JudgeLineKind::Texture(texture, _) => {
                         let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
-                        if color.a == 0.0 {
+                        color.a = visible_alpha;
+                        if color.a <= 0.001 {
                             return;
                         }
                         let hf = vec2(texture.width(), texture.height());
@@ -274,7 +284,10 @@ impl JudgeLine {
                         let t = anim.now_opt().unwrap_or(0.0);
                         let frame = frames.get_prog_frame(t);
                         let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
+                        color.a = visible_alpha;
+                        if color.a <= 0.001 {
+                            return;
+                        }
                         let hf = vec2(frame.width(), frame.height());
                         draw_texture_ex(
                             **frame,
@@ -290,7 +303,10 @@ impl JudgeLine {
                     }
                     JudgeLineKind::Text(anim) => {
                         let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0);
+                        color.a = visible_alpha;
+                        if color.a <= 0.001 {
+                            return;
+                        }
                         let now = anim.now();
                         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |_| {
                             ui.text(&now).pos(0., 0.).anchor(0.5, 0.5).size(1.).color(color).multiline().draw();
@@ -298,10 +314,27 @@ impl JudgeLine {
                     }
                     JudgeLineKind::Paint(anim, state) => {
                         let mut color = color.unwrap_or(WHITE);
-                        color.a = alpha.max(0.0) * 2.55;
+                        color.a = visible_alpha * 2.55;
+                        if color.a <= 0.001 {
+                            state.borrow_mut().1 = false;
+                            return;
+                        }
+                        let size = anim.now();
+                        if size <= 0. && !state.borrow().1 {
+                            // Avoid creating or switching to the paint target while it is idle.
+                            return;
+                        }
                         let mut gl = unsafe { get_internal_gl() };
                         let mut guard = state.borrow_mut();
                         let vp = get_viewport();
+                        let needs_resize = guard.0.as_ref().is_some_and(|pass| {
+                            let tex = pass.texture(gl.quad_context);
+                            tex.width != vp.2 as u32 || tex.height != vp.3 as u32
+                        });
+                        if needs_resize {
+                            guard.0 = None;
+                            guard.1 = false;
+                        }
                         let pass = *guard.0.get_or_insert_with(|| {
                             let ctx = &mut gl.quad_context;
                             let tex = Texture::new_render_texture(
@@ -320,7 +353,6 @@ impl JudgeLine {
                         let old_pass = gl.quad_gl.get_active_render_pass();
                         gl.quad_gl.render_pass(Some(pass));
                         gl.quad_gl.viewport(None);
-                        let size = anim.now();
                         if size <= 0. {
                             if guard.1 {
                                 clear_background(Color::default());
@@ -357,8 +389,9 @@ impl JudgeLine {
             let mut config = RenderConfig {
                 settings,
                 ctrl_obj: &mut self.ctrl_obj.borrow_mut(),
-                line_height: self.height.now() as f64,
+                line_height,
                 appear_before: f64::INFINITY,
+                appear_before_time: None,
                 draw_below: self.show_below,
                 incline_sin: self.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default(),
             };
@@ -376,6 +409,8 @@ impl JudgeLine {
                     }
                     w if (100..1000).contains(&w) => {
                         config.appear_before = (w as f64 - 100.) / 10.;
+                        let beat = bpm_list.beat(res.time);
+                        config.appear_before_time = Some(bpm_list.time_beats(beat - config.appear_before));
                     }
                     w if (1000..2000).contains(&w) => {
                         // TODO unsupported
@@ -396,13 +431,10 @@ impl JudgeLine {
             for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
                 note.render(res, &mut config, bpm_list);
             }
-            for index in &self.cache.above_indices {
-                let speed = self.notes[*index].speed;
+            for group in &self.cache.above_groups {
+                let speed = self.notes[group.start].speed;
                 let limit = height_above as f64 / speed;
-                for note in self.notes[*index..].iter() {
-                    if !note.above || speed != note.speed {
-                        break;
-                    }
+                for note in self.notes[group.start..group.end].iter() {
                     if agg && note.height - config.line_height + note.object.translation.1.now() as f64 > limit {
                         break;
                     }
@@ -413,13 +445,10 @@ impl JudgeLine {
                 for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
                     note.render(res, &mut config, bpm_list);
                 }
-                for index in &self.cache.below_indices {
-                    let speed = self.notes[*index].speed;
+                for group in &self.cache.below_groups {
+                    let speed = self.notes[group.start].speed;
                     let limit = height_below as f64 / speed;
-                    for note in self.notes[*index..].iter() {
-                        if speed != note.speed {
-                            break;
-                        }
+                    for note in self.notes[group.start..group.end].iter() {
                         if agg && note.height - config.line_height + note.object.translation.1.now() as f64 > limit {
                             break;
                         }
@@ -428,5 +457,85 @@ impl JudgeLine {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::NoteKind;
+    use crate::judge::{HitSound, JudgeStatus};
+
+    fn note(height: f64, speed: f64, above: bool, plain: bool) -> Note {
+        Note {
+            object: Object {
+                translation: if plain {
+                    Default::default()
+                } else {
+                    AnimVector(AnimFloat::default(), AnimFloat::fixed(1.0))
+                },
+                ..Default::default()
+            },
+            kind: NoteKind::Click,
+            hitsound: HitSound::Click,
+            time: height,
+            height,
+            speed,
+            color: WHITE,
+            fx_color: None,
+            judge_area: 1.0,
+            above,
+            multiple_hint: false,
+            fake: false,
+            judge: JudgeStatus::NotJudged,
+        }
+    }
+
+    #[test]
+    fn judge_line_cache_groups_plain_notes_by_side_and_speed() {
+        let mut notes = vec![
+            note(4.0, 2.0, false, true),
+            note(1.0, 1.0, true, true),
+            note(3.0, 2.0, true, true),
+            note(2.0, 1.0, false, true),
+            note(0.0, 1.0, true, false),
+        ];
+
+        let cache = JudgeLineCache::new(&mut notes);
+
+        assert_eq!(cache.not_plain_count, 1);
+        assert_eq!(cache.above_groups.iter().map(|it| (it.start, it.end)).collect::<Vec<_>>(), vec![(1, 2), (2, 3)]);
+        assert_eq!(cache.below_groups.iter().map(|it| (it.start, it.end)).collect::<Vec<_>>(), vec![(3, 4), (4, 5)]);
+        assert!(notes[cache.above_groups[0].start].above);
+        assert_eq!(notes[cache.above_groups[0].start].speed, 1.0);
+        assert!(notes[cache.above_groups[1].start].above);
+        assert_eq!(notes[cache.above_groups[1].start].speed, 2.0);
+        assert!(!notes[cache.below_groups[0].start].above);
+        assert_eq!(notes[cache.below_groups[0].start].speed, 1.0);
+        assert!(!notes[cache.below_groups[1].start].above);
+        assert_eq!(notes[cache.below_groups[1].start].speed, 2.0);
+    }
+
+    #[test]
+    fn judge_line_cache_advances_visible_windows_past_judged_notes() {
+        let mut notes = vec![note(1.0, 1.0, true, true), note(2.0, 1.0, true, true), note(3.0, 2.0, true, true)];
+        let mut cache = JudgeLineCache::new(&mut notes);
+        notes[cache.above_groups[0].start].judge = JudgeStatus::Judged;
+
+        cache.advance_visible_groups(&notes);
+
+        assert_eq!(cache.above_groups.iter().map(|it| (it.start, it.end)).collect::<Vec<_>>(), vec![(1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn judge_line_cache_drops_empty_visible_group() {
+        let mut notes = vec![note(1.0, 1.0, true, true), note(2.0, 1.0, true, true), note(3.0, 2.0, true, true)];
+        let mut cache = JudgeLineCache::new(&mut notes);
+        notes[0].judge = JudgeStatus::Judged;
+        notes[1].judge = JudgeStatus::Judged;
+
+        cache.advance_visible_groups(&notes);
+
+        assert_eq!(cache.above_groups.iter().map(|it| (it.start, it.end)).collect::<Vec<_>>(), vec![(2, 3)]);
     }
 }

@@ -272,6 +272,7 @@ pub struct Judge {
     // notes of each line in order
     // LinkedList::drain_filter is unstable...
     pub notes: Vec<(Vec<u32>, usize)>,
+    pub click_hold_cursor: Vec<usize>,
     pub trackers: HashMap<u64, FlickTracker>,
     pub last_time: f64,
 
@@ -311,6 +312,7 @@ impl Judge {
             .collect();
         Self {
             notes,
+            click_hold_cursor: vec![0; chart.lines.len()],
             trackers: HashMap::new(),
             last_time: 0.,
 
@@ -323,6 +325,7 @@ impl Judge {
 
     pub fn reset(&mut self) {
         self.notes.iter_mut().for_each(|it| it.1 = 0);
+        self.click_hold_cursor.fill(0);
         self.trackers.clear();
         self.inner.reset();
         self.judgements.borrow_mut().clear();
@@ -340,6 +343,9 @@ impl Judge {
                 note.judge = JudgeStatus::Judged;
                 *st += 1;
             }
+        }
+        for (cursor, (_, st)) in self.click_hold_cursor.iter_mut().zip(self.notes.iter()) {
+            *cursor = (*cursor).max(*st);
         }
         self.last_time = t;
     }
@@ -382,8 +388,7 @@ impl Judge {
         });
     }
 
-    fn touch_transform(flip_x: bool) -> impl Fn(&mut Touch) {
-        let vp = get_viewport();
+    fn touch_transform_in_viewport(vp: (i32, i32, i32, i32), flip_x: bool) -> impl Fn(&mut Touch) {
         move |touch| {
             let p = touch.position;
             touch.position = vec2(
@@ -396,10 +401,18 @@ impl Judge {
         }
     }
 
+    fn touch_transform(flip_x: bool) -> impl Fn(&mut Touch) {
+        Self::touch_transform_in_viewport(get_viewport(), flip_x)
+    }
+
     pub fn get_touches() -> Vec<Touch> {
+        Self::get_touches_in_viewport(get_viewport())
+    }
+
+    pub fn get_touches_in_viewport(vp: (i32, i32, i32, i32)) -> Vec<Touch> {
         TOUCHES.with(|it| {
             let guard = it.borrow();
-            let tr = Self::touch_transform(false);
+            let tr = Self::touch_transform_in_viewport(vp, false);
             guard
                 .touches
                 .iter()
@@ -525,9 +538,15 @@ impl Judge {
             .collect();
         // pos[line][touch]
         let mut pos = Vec::<Vec<Option<Point>>>::with_capacity(chart.lines.len());
-        for id in 0..chart.lines.len() {
-            chart.lines[id].object.set_time(t);
-            let inv = chart.lines[id].now_transform(res, &chart.lines).try_inverse().unwrap();
+        for line in &mut chart.lines {
+            line.object.set_time(t);
+        }
+        chart.prepare_frame_cache(res);
+        let inverse_transforms = {
+            let cache = chart.frame_cache.borrow();
+            cache.transforms.iter().map(|it| it.try_inverse().unwrap()).collect::<Vec<_>>()
+        };
+        for inv in inverse_transforms {
             pos.push(
                 touches
                     .iter()
@@ -568,7 +587,8 @@ impl Judge {
                 let Some(pos) = pos[id] else {
                     continue;
                 };
-                for id in &idx[*st..] {
+                let scan_start = (*st).max(self.click_hold_cursor[line_id]);
+                for (local_i, id) in idx[scan_start..].iter().enumerate() {
                     let note = &mut line.notes[*id as usize];
                     if !matches!(note.judge, JudgeStatus::NotJudged | JudgeStatus::PreJudge) {
                         continue;
@@ -605,6 +625,7 @@ impl Judge {
                     if key < closest.3 {
                         closest = (Some((line_id, *id)), dist, dt, key);
                     }
+                    self.click_hold_cursor[line_id] = self.click_hold_cursor[line_id].max(scan_start + local_i);
                 }
             }
             if let (Some((line_id, id)), _, dt, _) = closest {
@@ -649,55 +670,82 @@ impl Judge {
                 }
             }
         }
-        for _ in 0..keys_down {
-            // find the earliest not judged click / hold note
-            if let Some((line_id, id)) = chart
-                .lines
-                .iter()
-                .zip(self.notes.iter())
-                .enumerate()
-                .filter_map(|(line_id, (line, (idx, st)))| {
-                    idx[*st..]
-                        .iter()
-                        .cloned()
-                        .find(|id| {
-                            let note = &line.notes[*id as usize];
-                            matches!(note.judge, JudgeStatus::NotJudged) && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. })
-                        })
-                        .map(|id| (line_id, id))
-                })
-                .min_by_key(|(line_id, id)| chart.lines[*line_id].notes[*id as usize].time.not_nan())
-            {
-                let note = &mut chart.lines[line_id].notes[id as usize];
-                let dt = (t - note.time).abs() / spd;
-                if dt <= if matches!(note.kind, NoteKind::Click) { LIMIT_BAD } else { LIMIT_GOOD } {
-                    match note.kind {
-                        NoteKind::Click => {
-                            note.judge = JudgeStatus::Judged;
-                            judgements.push((
-                                if dt <= LIMIT_PERFECT {
-                                    Judgement::Perfect
-                                } else if dt <= LIMIT_GOOD {
-                                    Judgement::Good
-                                } else {
-                                    Judgement::Bad
-                                },
-                                line_id,
-                                id,
-                                None,
-                            ));
-                        }
-                        NoteKind::Hold { .. } => {
-                            note.hitsound.play(res);
-                            self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
-                            note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, (t - note.time) / spd, false, f64::INFINITY);
-                        }
-                        _ => unreachable!(),
-                    };
+        let mut keyboard_ptrs = self
+            .notes
+            .iter()
+            .enumerate()
+            .map(|(line_id, (_, st))| (*st).max(self.click_hold_cursor[line_id]))
+            .collect::<Vec<_>>();
+        let mut keyboard_candidates = vec![None; chart.lines.len()];
+        for line_id in 0..chart.lines.len() {
+            let line = &chart.lines[line_id];
+            let (idx, st) = &self.notes[line_id];
+            let mut ptr = keyboard_ptrs[line_id].max(*st);
+            while ptr < idx.len() {
+                let id = idx[ptr];
+                let note = &line.notes[id as usize];
+                if matches!(note.judge, JudgeStatus::NotJudged) && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
+                    keyboard_candidates[line_id] = Some(id);
+                    break;
                 }
-            } else {
-                break;
+                ptr += 1;
             }
+            keyboard_ptrs[line_id] = ptr;
+        }
+        for _ in 0..keys_down {
+            let Some((line_id, id)) = keyboard_candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(line_id, id)| id.map(|id| (line_id, id)))
+                .min_by_key(|(line_id, id)| chart.lines[*line_id].notes[*id as usize].time.not_nan())
+            else {
+                break;
+            };
+            let note = &mut chart.lines[line_id].notes[id as usize];
+            let dt = (t - note.time).abs() / spd;
+            if dt <= if matches!(note.kind, NoteKind::Click) { LIMIT_BAD } else { LIMIT_GOOD } {
+                match note.kind {
+                    NoteKind::Click => {
+                        note.judge = JudgeStatus::Judged;
+                        judgements.push((
+                            if dt <= LIMIT_PERFECT {
+                                Judgement::Perfect
+                            } else if dt <= LIMIT_GOOD {
+                                Judgement::Good
+                            } else {
+                                Judgement::Bad
+                            },
+                            line_id,
+                            id,
+                            None,
+                        ));
+                    }
+                    NoteKind::Hold { .. } => {
+                        note.hitsound.play(res);
+                        self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
+                        note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, (t - note.time) / spd, false, f64::INFINITY);
+                    }
+                    _ => unreachable!(),
+                };
+            }
+            let line = &chart.lines[line_id];
+            let (idx, st) = &self.notes[line_id];
+            let mut ptr = keyboard_ptrs[line_id].max(*st);
+            if ptr < idx.len() && idx[ptr] == id {
+                ptr += 1;
+            }
+            keyboard_candidates[line_id] = None;
+            while ptr < idx.len() {
+                let next_id = idx[ptr];
+                let next_note = &line.notes[next_id as usize];
+                if matches!(next_note.judge, JudgeStatus::NotJudged) && matches!(next_note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
+                    keyboard_candidates[line_id] = Some(next_id);
+                    break;
+                }
+                ptr += 1;
+            }
+            keyboard_ptrs[line_id] = ptr;
+            self.click_hold_cursor[line_id] = self.click_hold_cursor[line_id].max(ptr);
         }
         for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(pos.iter()).zip(self.notes.iter()).enumerate() {
             line.object.set_time(t);
@@ -797,6 +845,10 @@ impl Judge {
                 }
             }
         }
+        let transforms = {
+            let cache = chart.frame_cache.borrow();
+            cache.transforms.clone()
+        };
         for (judgement, line_id, id, diff) in judgements {
             let line = &mut chart.lines[line_id];
             let note = &mut line.notes[id as usize];
@@ -804,7 +856,7 @@ impl Judge {
             note.object.set_time(t);
             let line = &chart.lines[line_id];
             let note = &line.notes[id as usize];
-            let line_tr = line.now_transform(res, &chart.lines);
+            let line_tr = transforms[line_id];
             self.commit(
                 t,
                 judgement,
@@ -870,6 +922,9 @@ impl Judge {
                 *st += 1;
             }
         }
+        for (cursor, (_, st)) in self.click_hold_cursor.iter_mut().zip(self.notes.iter()) {
+            *cursor = (*cursor).max(*st);
+        }
         self.last_time = t / spd;
     }
 
@@ -910,6 +965,7 @@ impl Judge {
             {
                 *st += 1;
             }
+            self.click_hold_cursor[line_id] = self.click_hold_cursor[line_id].max(*st);
         }
         for (line_id, id) in judgements.into_iter() {
             self.commit(t, Judgement::Perfect, line_id as _, id, 0.);

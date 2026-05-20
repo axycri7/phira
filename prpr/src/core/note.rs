@@ -52,6 +52,7 @@ pub struct RenderConfig<'a> {
     pub ctrl_obj: &'a mut CtrlObject,
     pub line_height: f64,
     pub appear_before: f64,
+    pub appear_before_time: Option<f64>,
     pub draw_below: bool,
     pub incline_sin: f32,
 }
@@ -108,7 +109,7 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
     ];
     res.note_buffer
         .borrow_mut()
-        .push((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
+        .push_quad((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
 }
 
 fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
@@ -191,14 +192,11 @@ impl Note {
         self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
     }
 
-    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, _bpm_list: &mut BpmList) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
         }
-        if config.appear_before.is_finite() {
-            // TODO optimize
-            let beat = bpm_list.beat(self.time);
-            let time = bpm_list.time_beats(beat - config.appear_before);
+        if let Some(time) = config.appear_before_time {
             if time > res.time {
                 return;
             }
@@ -215,6 +213,9 @@ impl Note {
             ..self.color
         };
         color.a *= res.alpha * ctrl_obj.alpha.now_opt().unwrap_or(1.);
+        if color.a <= 0.001 {
+            return;
+        }
         let spd = self.speed * ctrl_obj.y.now_opt().unwrap_or(1.) as f64;
 
         let line_height = config.line_height / res.aspect_ratio as f64 * spd;
@@ -259,6 +260,9 @@ impl Note {
                 color.a *= if self.fake && res.time >= self.time { 0. } else { alpha as f32 };
             }
             color.a *= mod_alpha as f32;
+            if color.a <= 0.001 {
+                return;
+            }
             res.with_model(self.now_transform(res, ctrl_obj, base as f32, config.incline_sin), |res| {
                 draw_center(res, tex, order, scale, color);
             });
@@ -283,6 +287,9 @@ impl Note {
                     }
                     let end_height = end_height / res.aspect_ratio as f64 * spd;
                     color.a *= mod_alpha as f32;
+                    if color.a <= 0.001 {
+                        return;
+                    }
 
                     let h = if self.time <= res.time { line_height } else { height };
                     let bottom = (h - line_height) as f32;
@@ -379,6 +386,10 @@ impl BadNote {
         }
         res.with_model(self.matrix, |res| {
             let style = &res.res_pack.note_style;
+            let alpha = ((self.time - res.time).max(-1.) / BAD_TIME + 1.) as f32;
+            if alpha <= 0.001 {
+                return;
+            }
             draw_center(
                 res,
                 match &self.kind {
@@ -389,7 +400,7 @@ impl BadNote {
                 },
                 self.kind.order(),
                 res.note_width,
-                Color::new(0.423529, 0.262745, 0.262745, ((self.time - res.time).max(-1.) / BAD_TIME + 1.) as f32),
+                Color::new(0.423529, 0.262745, 0.262745, alpha),
             );
         });
         true
