@@ -39,6 +39,15 @@ pub fn basic_client_builder() -> ClientBuilder {
     builder
 }
 
+pub(crate) fn request_url(url: impl reqwest::IntoUrl) -> RequestBuilder {
+    let req = CLIENT.load().get(url);
+    if let Some(token) = CLIENT_TOKEN.load().as_ref() {
+        req.bearer_auth(token.as_str())
+    } else {
+        req
+    }
+}
+
 fn client_locale() -> String {
     get_data().language.clone().unwrap_or(LANG_IDENTS[0].to_string())
 }
