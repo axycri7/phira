@@ -1,6 +1,6 @@
-use super::{MSRenderTarget, Matrix, Point, NOTE_WIDTH_RATIO_BASE};
+use super::{MSRenderTarget, Matrix, NoteBuffer, Point, NOTE_WIDTH_RATIO_BASE};
 use crate::{
-    config::Config,
+    config::{Config, EffectQuality},
     ext::{create_audio_manger, nalgebra_to_glm, SafeTexture},
     fs::FileSystem,
     info::ChartInfo,
@@ -8,21 +8,18 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use macroquad::prelude::*;
-use miniquad::{
-    gl::{GLuint, GL_LINEAR},
-    Texture, TextureWrap,
-};
+use miniquad::{gl::GL_LINEAR, TextureWrap};
 use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     ops::DerefMut,
     path::Path,
     sync::atomic::AtomicU32,
 };
 
-pub const MAX_SIZE: usize = 64; // needs tweaking
+pub const MAX_SIZE: usize = 256;
 pub static DPI_VALUE: AtomicU32 = AtomicU32::new(250);
 pub const BUFFER_SIZE: usize = 1024;
 
@@ -306,6 +303,21 @@ pub struct ParticleEmitter {
     pub hide_particles: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct HitParticleParams {
+    pub extra_count: usize,
+    pub lifetime_scale: f32,
+}
+
+impl HitParticleParams {
+    fn for_gameplay_quality(quality: EffectQuality) -> Self {
+        Self {
+            extra_count: quality.hit_particle_count(4),
+            lifetime_scale: quality.hit_particle_lifetime_scale(),
+        }
+    }
+}
+
 impl ParticleEmitter {
     pub fn new(res_pack: &ResourcePack, scale: f32, hide_particles: bool) -> Result<Self> {
         let colors_curve = {
@@ -351,13 +363,31 @@ impl ParticleEmitter {
     }
 
     pub fn emit_at(&mut self, pt: Vec2, rotation: f32, color: Color) {
+        self.emit_at_with_params(
+            pt,
+            rotation,
+            color,
+            HitParticleParams {
+                extra_count: 4,
+                lifetime_scale: 1.,
+            },
+        );
+    }
+
+    pub fn emit_at_with_params(&mut self, pt: Vec2, rotation: f32, color: Color, params: HitParticleParams) {
+        let emitter_lifetime = self.emitter.config.lifetime;
+        let square_lifetime = self.emitter_square.config.lifetime;
+        self.emitter.config.lifetime = emitter_lifetime * params.lifetime_scale;
+        self.emitter_square.config.lifetime = square_lifetime * params.lifetime_scale;
         self.emitter.config.initial_rotation = rotation;
         self.emitter.config.base_color = color;
         self.emitter.emit(pt, 1);
-        if !self.hide_particles {
+        if !self.hide_particles && params.extra_count != 0 {
             self.emitter_square.config.base_color = color;
-            self.emitter_square.emit(pt, 4);
+            self.emitter_square.emit(pt, params.extra_count);
         }
+        self.emitter.config.lifetime = emitter_lifetime;
+        self.emitter_square.config.lifetime = square_lifetime;
     }
 
     pub fn draw(&mut self, dt: f32) {
@@ -368,37 +398,6 @@ impl ParticleEmitter {
     pub fn set_scale(&mut self, scale: f32) {
         self.emitter.config.size = self.scale * scale / 5.;
         self.emitter_square.config.size = self.scale * scale / 44.;
-    }
-}
-
-type NoteBufferMap = BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>;
-
-#[derive(Default)]
-pub struct NoteBuffer(NoteBufferMap);
-
-impl NoteBuffer {
-    pub fn push(&mut self, key: (i8, GLuint), vertices: [Vertex; 4]) {
-        let meshes = self.0.entry(key).or_default();
-        if meshes.last().is_none_or(|it| it.0.len() + 4 > MAX_SIZE * 4) {
-            meshes.push(Default::default());
-        }
-        let last = meshes.last_mut().unwrap();
-        let i = last.0.len() as u16;
-        last.0.extend_from_slice(&vertices);
-        last.1.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
-    }
-
-    pub fn draw_all(&mut self) {
-        let mut gl = unsafe { get_internal_gl() };
-        gl.flush();
-        let gl = gl.quad_gl;
-        gl.draw_mode(DrawMode::Triangles);
-        for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
-            gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFormat::RGBA8) })));
-            for mesh in meshes {
-                gl.geometry(&mesh.0, &mesh.1);
-            }
-        }
     }
 }
 
@@ -579,20 +578,54 @@ impl Resource {
             return;
         }
         let pt = self.world_to_screen(Point::default());
-        self.emitter.emit_at(
-            vec2(if self.config.flip_x() { -pt.x } else { pt.x }, -pt.y),
-            if self.res_pack.info.hit_fx_rotate { rotation.to_radians() } else { 0. },
+        let pt = vec2(if self.config.flip_x() { -pt.x } else { pt.x }, -pt.y);
+        let rotation = if self.res_pack.info.hit_fx_rotate {
+            rotation.to_radians()
+        } else {
+            0.
+        };
+        // Lower quality levels reduce transparent overdraw from decorative hit particles.
+        self.emitter.emit_at_with_params(
+            pt,
+            rotation,
             color,
+            HitParticleParams::for_gameplay_quality(self.config.effect_quality),
         );
     }
 
     pub fn update_size(&mut self, vp: (i32, i32, i32, i32)) -> bool {
-        if self.last_vp == vp {
+        let target_dim = if !self.no_effect && self.config.sample_count == 1 {
+            let scale = self.config.effect_quality_scale();
+            (
+                ((vp.2 as f32) * scale).round().max(1.) as u32,
+                ((vp.3 as f32) * scale).round().max(1.) as u32,
+            )
+        } else {
+            (vp.2 as u32, vp.3 as u32)
+        };
+        let target_ready = if !self.no_effect || self.config.sample_count != 1 {
+            self.chart_target
+                .as_ref()
+                .is_some_and(|target| target.texture_dim() == target_dim && target.samples() == self.config.sample_count)
+        } else {
+            self.chart_target.is_none()
+        };
+        if self.last_vp == vp && target_ready {
             return false;
         }
         self.last_vp = vp;
         if !self.no_effect || self.config.sample_count != 1 {
-            self.chart_target = Some(MSRenderTarget::new((vp.2 as u32, vp.3 as u32), self.config.sample_count));
+            self.chart_target = Some(if self.config.sample_count == 1 {
+                MSRenderTarget::new_scaled(
+                    (vp.2 as u32, vp.3 as u32),
+                    target_dim,
+                    self.config.sample_count,
+                )
+            } else {
+                MSRenderTarget::new((vp.2 as u32, vp.3 as u32), self.config.sample_count)
+            });
+        } else {
+            self.chart_target = None;
         }
         fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
             let w = w as f32;

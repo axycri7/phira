@@ -721,7 +721,6 @@ impl Emitter {
     pub fn emit(&mut self, pos: Vec2, n: usize) {
         for _ in 0..n {
             self.emit_particle(pos);
-            self.particles_spawned += 1;
         }
     }
 
@@ -787,6 +786,9 @@ impl Emitter {
     }
 
     pub fn draw(&mut self, pos: Vec2, dt: f32) {
+        if self.gpu_particles.is_empty() && !self.config.emitting && !self.mesh_dirty {
+            return;
+        }
         let mut gl = unsafe { get_internal_gl() };
 
         gl.flush();

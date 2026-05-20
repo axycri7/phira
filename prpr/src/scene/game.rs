@@ -42,7 +42,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
-const PAUSE_CLICK_INTERVAL: f32 = 0.7;
+const PAUSE_CLICK_INTERVAL: f64 = 0.7;
 const PBC_CACHE_VERSION: &str = "pbc-cache-v2";
 const PBC_CACHE_DIR: &str = ".phira-pbc-cache";
 
@@ -219,7 +219,7 @@ pub struct GameScene {
     state: State,
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
-    pause_first_time: f32,
+    pause_first_time: f64,
 
     pub bad_notes: Vec<BadNote>,
 
@@ -594,7 +594,7 @@ impl GameScene {
             state: State::Starting,
             last_update_time: 0.,
             pause_rewind: None,
-            pause_first_time: f32::NEG_INFINITY,
+            pause_first_time: f64::NEG_INFINITY,
 
             bad_notes: Vec::new(),
 
@@ -659,11 +659,11 @@ impl GameScene {
                 }
             })
         {
-            let t = tm.now() as f32;
+            let t = tm.now();
             if t - self.pause_first_time > PAUSE_CLICK_INTERVAL && res.config.double_click_to_pause {
                 self.pause_first_time = t;
             } else {
-                self.pause_first_time = f32::NEG_INFINITY;
+                self.pause_first_time = f64::NEG_INFINITY;
                 if !self.music.paused() {
                     self.music.pause()?;
                 }
@@ -674,7 +674,7 @@ impl GameScene {
         }
         ui.alpha(res.alpha, |ui| {
             ui.text("MAGIC BUGFIX TEXT").color(Color::new(0., 0., 0., 0.)).draw();
-            if tm.now() as f32 - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
+            if tm.now() - self.pause_first_time <= PAUSE_CLICK_INTERVAL {
                 ui.fill_circle(pause_center.x, pause_center.y, 0.05, Color::new(1., 1., 1., 0.5));
             }
 

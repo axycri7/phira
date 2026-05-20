@@ -41,7 +41,7 @@ mod object;
 pub use object::{CtrlObject, Object};
 
 mod render;
-pub use render::{copy_fbo, internal_id, MSRenderTarget};
+pub use render::{copy_fbo, internal_id, MSRenderTarget, NoteBuffer};
 
 mod resource;
 pub use resource::{NoteStyle, ParticleEmitter, ResPackInfo, Resource, ResourcePack, BUFFER_SIZE, DPI_VALUE};
