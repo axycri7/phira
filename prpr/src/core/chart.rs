@@ -22,6 +22,27 @@ pub struct ChartSettings {
 
 pub type HitSoundMap = HashMap<String, AudioClip>;
 
+#[derive(Default)]
+pub struct ChartFrameCache {
+    pub time: f64,
+    pub positions: Vec<Vector>,
+    pub transforms: Vec<Matrix>,
+    pub rotations: Vec<f32>,
+    pub line_heights: Vec<f64>,
+    states: Vec<u8>,
+}
+
+impl ChartFrameCache {
+    fn resize(&mut self, len: usize) {
+        self.positions.resize(len, Vector::default());
+        self.transforms.resize(len, Matrix::identity());
+        self.rotations.resize(len, 0.0);
+        self.line_heights.resize(len, 0.0);
+        self.states.resize(len, 0);
+        self.states.fill(0);
+    }
+}
+
 pub struct Chart {
     pub offset: f32,
     pub lines: Vec<JudgeLine>,
@@ -38,6 +59,7 @@ pub struct Chart {
     pub attach_ui: [Option<usize>; 7],
 
     pub hitsounds: HitSoundMap,
+    pub frame_cache: RefCell<ChartFrameCache>,
 }
 
 impl Chart {
@@ -65,6 +87,19 @@ impl Chart {
             attach_ui,
 
             hitsounds,
+            frame_cache: RefCell::default(),
+        }
+    }
+
+    pub fn prepare_frame_cache(&self, res: &Resource) {
+        let mut cache = self.frame_cache.borrow_mut();
+        if cache.time == res.time && cache.positions.len() == self.lines.len() {
+            return;
+        }
+        cache.resize(self.lines.len());
+        cache.time = res.time;
+        for id in 0..self.lines.len() {
+            prepare_line_frame_cache(id, &self.lines, res, &mut cache);
         }
     }
 
@@ -83,7 +118,13 @@ impl Chart {
             let lines = &self.lines;
             let line = &lines[id];
             let obj = &line.object;
-            let mut tr = line.fetch_pos(res, lines);
+            let cache = self.frame_cache.borrow();
+            let mut tr = if cache.time == res.time {
+                cache.positions.get(id).copied().unwrap_or_else(|| line.fetch_pos(res, lines))
+            } else {
+                line.fetch_pos(res, lines)
+            };
+            drop(cache);
             tr.y = -tr.y;
             let color = self.lines[id].color.now_opt().unwrap_or(WHITE);
             let scale = obj.now_scale(Vector::new(scale_point.0, scale_point.1));
@@ -124,12 +165,13 @@ impl Chart {
     pub fn update(&mut self, res: &mut Resource) {
         for line in &mut self.lines {
             line.object.set_time(res.time);
+            line.height.set_time(res.time);
         }
-        // TODO optimize
-        let trs = self.lines.iter().map(|it| it.now_transform(res, &self.lines)).collect::<Vec<_>>();
-        let rotations = self.lines.iter().map(|it| it.fetch_rot(&self.lines)).collect::<Vec<_>>();
-        for ((line, tr), rot) in self.lines.iter_mut().zip(trs).zip(rotations) {
-            line.update(res, tr, rot);
+        self.frame_cache.borrow_mut().time = f64::NAN;
+        self.prepare_frame_cache(res);
+        let cache = self.frame_cache.borrow();
+        for (id, line) in self.lines.iter_mut().enumerate() {
+            line.update(res, cache.transforms[id], cache.rotations[id], cache.line_heights[id]);
         }
         for effect in &mut self.extra.effects {
             effect.update(res);
@@ -143,6 +185,8 @@ impl Chart {
     }
 
     pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
+        res.note_buffer.borrow_mut().begin_frame();
+        self.prepare_frame_cache(res);
         #[cfg(feature = "video")]
         for (video, attach) in &self.extra.videos {
             if let Some(attach) = attach {
@@ -158,11 +202,12 @@ impl Chart {
         }
         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if res.config.flip_x() { -1. } else { 1. }, -1.)), |res| {
             let mut guard = self.bpm_list.borrow_mut();
+            let cache = self.frame_cache.borrow();
             for id in &self.order {
-                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id);
+                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id, cache.transforms[*id], cache.line_heights[*id]);
             }
             drop(guard);
-            res.note_buffer.borrow_mut().draw_all();
+            res.note_buffer.borrow_mut().flush();
             if res.config.sample_count > 1 {
                 unsafe { get_internal_gl() }.flush();
                 if let Some(target) = &res.chart_target {
@@ -183,4 +228,47 @@ impl Chart {
             }
         });
     }
+}
+
+fn prepare_line_frame_cache(id: usize, lines: &[JudgeLine], res: &Resource, cache: &mut ChartFrameCache) {
+    if cache.states[id] == 2 {
+        return;
+    }
+    if cache.states[id] == 1 {
+        tracing::warn!(line = id, "cycle detected in judge line parent graph");
+        return;
+    }
+
+    cache.states[id] = 1;
+    let line = &lines[id];
+    let parent = line.parent.filter(|parent| *parent < lines.len());
+    let parent_ready = if let Some(parent) = parent {
+        prepare_line_frame_cache(parent, lines, res, cache);
+        cache.states[parent] == 2
+    } else {
+        false
+    };
+
+    let own_rotation = line.object.rotation.now();
+    let own_translation = line.object.now_translation(res);
+    let (position, rotation) = if let Some(parent) = parent.filter(|_| parent_ready) {
+        let parent_rotation = cache.rotations[parent];
+        (
+            cache.positions[parent] + Rotation2::new(parent_rotation.to_radians()) * own_translation,
+            own_rotation
+                + if line.rot_with_parent {
+                    parent_rotation
+                } else {
+                    0.0
+                },
+        )
+    } else {
+        (own_translation, own_rotation)
+    };
+
+    cache.positions[id] = position;
+    cache.rotations[id] = rotation;
+    cache.transforms[id] = Rotation2::new(rotation.to_radians()).to_homogeneous().append_translation(&position);
+    cache.line_heights[id] = line.height.now() as f64;
+    cache.states[id] = 2;
 }
