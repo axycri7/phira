@@ -15,6 +15,7 @@ use inputbox::InputBox;
 use macroquad::prelude::*;
 use once_cell::sync::Lazy;
 use prpr::{
+    config::EffectQuality,
     core::BOLD_FONT,
     ext::{open_url, poll_future, semi_white, LocalTask, RectExt, SafeTexture},
     scene::{request_input, return_input, show_error, show_message, take_input},
@@ -374,6 +375,14 @@ fn render_switch(ui: &mut Ui, r: Rect, t: f32, btn: &mut DRectButton, on: bool) 
     btn.render_text(ui, r, t, if on { ttl!("switch-on") } else { ttl!("switch-off") }, 0.5, on);
 }
 
+fn effect_quality_text(quality: EffectQuality) -> Cow<'static, str> {
+    match quality {
+        EffectQuality::High => tl!("effect-quality-high"),
+        EffectQuality::Medium => tl!("effect-quality-medium"),
+        EffectQuality::Low => tl!("effect-quality-low"),
+    }
+}
+
 #[inline]
 fn right_rect(w: f32) -> Rect {
     let rh = ITEM_HEIGHT * 2. / 3.;
@@ -395,6 +404,7 @@ struct GeneralList {
     mp_addr_btn: DRectButton,
     #[cfg(not(target_env = "ohos"))]
     lowq_btn: DRectButton,
+    effect_quality_btn: DRectButton,
     prefer_reduced_motion_btn: DRectButton,
     insecure_btn: DRectButton,
     enable_anys_btn: DRectButton,
@@ -430,6 +440,7 @@ impl GeneralList {
             mp_addr_btn: DRectButton::new(),
             #[cfg(not(target_env = "ohos"))]
             lowq_btn: DRectButton::new(),
+            effect_quality_btn: DRectButton::new(),
             prefer_reduced_motion_btn: DRectButton::new(),
             insecure_btn: DRectButton::new(),
             enable_anys_btn: DRectButton::new(),
@@ -513,6 +524,10 @@ impl GeneralList {
         #[cfg(not(target_env = "ohos"))]
         if self.lowq_btn.touch(touch, t) {
             config.sample_count = if config.sample_count == 1 { 2 } else { 1 };
+            return Ok(Some(true));
+        }
+        if self.effect_quality_btn.touch(touch, t) {
+            config.effect_quality = config.effect_quality.next();
             return Ok(Some(true));
         }
         if self.prefer_reduced_motion_btn.touch(touch, t) {
@@ -625,6 +640,17 @@ impl GeneralList {
         item! {
             render_title(ui, tl!("item-lowq"), Some(tl!("item-lowq-sub")));
             render_switch(ui, rr, t, &mut self.lowq_btn, config.sample_count == 1);
+        }
+        item! {
+            render_title(ui, tl!("item-effect-quality"), Some(tl!("item-effect-quality-sub")));
+            self.effect_quality_btn.render_text(
+                ui,
+                rr,
+                t,
+                effect_quality_text(config.effect_quality),
+                0.45,
+                config.effect_quality != EffectQuality::High,
+            );
         }
         item! {
             let cache_size = if let Some(size) = self.cache_size {

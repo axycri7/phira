@@ -3,20 +3,19 @@
 prpr_l10n::tl_file!("game");
 
 use super::{
-    draw_background,
     ending::RecordUpdateState,
     loading::{BasicPlayer, SaveFn, UpdateFn, UploadFn},
     request_input, return_input, show_message, take_input, EndingScene, NextScene, Scene,
 };
 use crate::{
-    bin::BinaryReader,
+    bin::BinaryWriter,
     config::{Config, Mods},
     core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector, PGR_FONT},
-    ext::{parse_time, screen_aspect, semi_white, RectExt, SafeTexture, ScaleType},
-    fs::FileSystem,
+    ext::{parse_time, screen_aspect, semi_white, source_of_image, RectExt, SafeTexture, ScaleType},
+    fs::{ExternalFileSystem, FileSystem},
     info::{ChartFormat, ChartInfo},
-    judge::Judge,
-    parse::{parse_extra, parse_pec, parse_phigros, parse_rpe},
+    judge::{HitSound, Judge},
+    parse::{infer_chart_format_bytes, parse_chart_bytes, parse_extra, ParseOptions},
     task::Task,
     time::TimeManager,
     ui::{RectButton, TextPainter, Ui},
@@ -28,21 +27,24 @@ use lyon::path::Path;
 use macroquad::{prelude::*, window::InternalGlContext};
 use sasa::{Music, MusicParams};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     any::Any,
     cell::RefCell,
     fs::File,
-    io::{Cursor, ErrorKind},
+    io::{ErrorKind, Write},
     ops::{Deref, DerefMut, Range},
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::{debug, warn};
 
 const PAUSE_CLICK_INTERVAL: f32 = 0.7;
+const PBC_CACHE_VERSION: &str = "pbc-cache-v2";
+const PBC_CACHE_DIR: &str = ".phira-pbc-cache";
 
 #[rustfmt::skip]
 #[cfg(closed)]
@@ -106,6 +108,84 @@ pub enum GameMode {
     View,
 }
 
+#[derive(Default)]
+struct HudTextCache {
+    score_value: u32,
+    score: String,
+    combo_value: u32,
+    combo: String,
+    accuracy_value: u32,
+    accuracy: String,
+}
+
+impl HudTextCache {
+    fn score(&mut self, score: u32) -> &str {
+        if self.score.is_empty() || self.score_value != score {
+            self.score_value = score;
+            self.score = format!("{score:07}");
+        }
+        &self.score
+    }
+
+    fn combo(&mut self, combo: u32) -> &str {
+        if self.combo.is_empty() || self.combo_value != combo {
+            self.combo_value = combo;
+            self.combo = combo.to_string();
+        }
+        &self.combo
+    }
+
+    fn accuracy(&mut self, accuracy: f64) -> &str {
+        let value = (accuracy * 10000.).round().clamp(0., 10000.) as u32;
+        if self.accuracy.is_empty() || self.accuracy_value != value {
+            self.accuracy_value = value;
+            self.accuracy = format!("{:05.2}%", value as f32 / 100.);
+        }
+        &self.accuracy
+    }
+}
+
+#[derive(Default)]
+struct StaticRenderLayer {
+    target: Option<RenderTarget>,
+    dim: (u32, u32),
+    content_key: u64,
+    valid: bool,
+}
+
+impl StaticRenderLayer {
+    fn invalidate(&mut self) {
+        self.valid = false;
+    }
+
+    fn ensure_target(&mut self, dim: (u32, u32), content_key: u64) -> RenderTarget {
+        let dim = (dim.0.max(1), dim.1.max(1));
+        if self.target.is_none() || self.dim != dim || self.content_key != content_key {
+            if let Some(target) = self.target.take() {
+                target.delete();
+            }
+            self.target = Some(render_target(dim.0, dim.1));
+            self.dim = dim;
+            self.content_key = content_key;
+            self.valid = false;
+        }
+        self.target.unwrap()
+    }
+}
+
+impl Drop for StaticRenderLayer {
+    fn drop(&mut self) {
+        if let Some(target) = self.target.take() {
+            target.delete();
+        }
+    }
+}
+
+#[derive(Default)]
+struct StaticRenderCache {
+    background: StaticRenderLayer,
+}
+
 #[derive(Clone)]
 enum State {
     Starting,
@@ -155,6 +235,8 @@ pub struct GameScene {
     fps_last_frame_time: f64,
 
     dead: bool,
+    hud_text: HudTextCache,
+    static_cache: StaticRenderCache,
 }
 
 macro_rules! reset {
@@ -192,44 +274,242 @@ impl GameScene {
         bail!("Cannot find chart file")
     }
 
-    pub fn infer_chart_format(info: &ChartInfo, bytes: &[u8]) -> ChartFormat {
-        info.format.clone().unwrap_or_else(|| {
-            if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                if text.starts_with('{') {
-                    if text.contains("\"META\"") {
-                        ChartFormat::Rpe
-                    } else {
-                        ChartFormat::Pgr
-                    }
+    fn blit_chart_target(&mut self, ui: &Ui, asp: f32) {
+        if let Some(target) = &self.res.chart_target {
+            self.gl.flush();
+            push_camera_state();
+            self.gl.quad_gl.viewport(None);
+            set_camera(&Camera2D {
+                zoom: vec2(1., asp),
+                render_target: self.res.camera.render_target,
+                viewport: Some(ui.viewport),
+                ..Default::default()
+            });
+            draw_texture_ex(
+                target.output().texture,
+                -1.,
+                -ui.top,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(2., ui.top * 2.)),
+                    ..Default::default()
+                },
+            );
+            pop_camera_state();
+        }
+    }
+
+    fn draw_dimmed_background(background: Texture2D, ui: &Ui, dim: f32) {
+        let rect = Rect::new(-1., -ui.top, 2., ui.top * 2.);
+        let tex = background;
+        let (w, h) = (tex.width(), tex.height());
+        // Fold the constant black overlay into the background draw to avoid a full-screen pass.
+        draw_texture_ex(
+            tex,
+            rect.x,
+            rect.y,
+            Color::new(1. - dim, 1. - dim, 1. - dim, 1.),
+            DrawTextureParams {
+                source: source_of_image(&tex, rect, ScaleType::CropCenter)
+                    .map(|it| Rect::new(it.x * w, it.y * h, it.w * w, it.h * h)),
+                dest_size: Some(rect.size()),
+                ..Default::default()
+            },
+        );
+    }
+
+    fn draw_cached_layer(target: RenderTarget, ui: &Ui, color: Color) {
+        draw_texture_ex(
+            target.texture,
+            -1.,
+            -ui.top,
+            color,
+            DrawTextureParams {
+                dest_size: Some(vec2(2., ui.top * 2.)),
+                flip_y: true,
+                ..Default::default()
+            },
+        );
+    }
+
+    fn render_background(&mut self, ui: &Ui, asp: f32, chart_onto: Option<RenderTarget>) {
+        let dim = (ui.viewport.2 as u32, ui.viewport.3 as u32);
+        let content_key = (*self.res.background)
+            .raw_miniquad_texture_handle()
+            .gl_internal_id() as u64;
+        let target = self.static_cache.background.ensure_target(dim, content_key);
+        if !self.static_cache.background.valid {
+            push_camera_state();
+            set_camera(&Camera2D {
+                zoom: vec2(1., -asp),
+                render_target: Some(target),
+                ..Default::default()
+            });
+            clear_background(BLACK);
+            Self::draw_dimmed_background(*self.res.background, ui, 0.3);
+            pop_camera_state();
+            self.static_cache.background.valid = true;
+        }
+        push_camera_state();
+        set_camera(&Camera2D {
+            zoom: vec2(1., -asp),
+            viewport: if self.res.chart_target.is_some() { None } else { Some(ui.viewport) },
+            render_target: chart_onto,
+            ..Default::default()
+        });
+        Self::draw_cached_layer(target, ui, WHITE);
+        pop_camera_state();
+    }
+
+    fn ui_progress(&self, tm: &TimeManager) -> f32 {
+        let time = tm.now();
+        (match self.state {
+            State::Starting => {
+                if time <= Self::BEFORE_TIME {
+                    1. - (1. - time / Self::BEFORE_TIME).powi(3)
                 } else {
-                    ChartFormat::Pec
+                    1.
                 }
-            } else {
-                ChartFormat::Pbc
             }
-        })
+            State::BeforeMusic | State::Playing => 1.,
+            State::Ending => {
+                let t = time - self.res.track_length - WAIT_TIME;
+                1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
+            }
+        }) as f32
+    }
+
+    pub fn infer_chart_format(info: &ChartInfo, bytes: &[u8]) -> ChartFormat {
+        infer_chart_format_bytes(info.format.as_ref(), bytes)
+    }
+
+    fn pbc_cache_path(format: &ChartFormat, bytes: &[u8], extra: Option<&str>, options: ParseOptions) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(PBC_CACHE_VERSION.as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{format:?}").as_bytes());
+        hasher.update([0]);
+        hasher.update([options.use_rpe_170_speed as u8]);
+        hasher.update([0]);
+        if let Some(extra) = extra {
+            hasher.update([1]);
+            hasher.update(extra.as_bytes());
+        } else {
+            hasher.update([0]);
+        }
+        hasher.update([0]);
+        hasher.update(bytes);
+        format!("{PBC_CACHE_DIR}/{:x}.pbc", hasher.finalize())
+    }
+
+    async fn load_custom_hitsounds(chart: &mut Chart, fs: &mut dyn FileSystem) -> Result<()> {
+        let mut names = Vec::new();
+        for note in chart.lines.iter().flat_map(|line| line.notes.iter()) {
+            if let HitSound::Custom(name) = &note.hitsound {
+                if !chart.hitsounds.contains_key(name) && !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        for name in names {
+            let data = fs.load_file(&name).await.with_context(|| format!("failed to load hitsound {name}"))?;
+            chart.hitsounds.insert(name, sasa::AudioClip::new(data)?);
+        }
+        Ok(())
+    }
+
+    async fn load_pbc_cache(fs: &mut dyn FileSystem, path: &str) -> Option<Vec<u8>> {
+        let external = fs.as_any().downcast_mut::<ExternalFileSystem>()?;
+        match external.0.read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                tracing::trace!(path, "PBC cache miss: {err:?}");
+                None
+            }
+        }
+    }
+
+    fn write_pbc_cache(fs: &mut dyn FileSystem, path: &str, chart: &Chart) {
+        let Some(external) = fs.as_any().downcast_mut::<ExternalFileSystem>() else {
+            return;
+        };
+        if let Err(err) = external.0.create_dir_all(PBC_CACHE_DIR) {
+            tracing::warn!(path, "failed to create PBC cache directory: {err:?}");
+            return;
+        }
+        let mut bytes = Vec::new();
+        if let Err(err) = BinaryWriter::new(&mut bytes).write(chart) {
+            tracing::warn!(path, "failed to encode PBC cache: {err:?}");
+            return;
+        }
+        match external.0.create(path).and_then(|mut file| {
+            file.write_all(&bytes)?;
+            Ok(())
+        }) {
+            Ok(()) => tracing::trace!(path, bytes = bytes.len(), "wrote PBC cache"),
+            Err(err) => tracing::warn!(path, "failed to write PBC cache: {err:?}"),
+        }
     }
 
     pub async fn load_chart(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<(Chart, Vec<u8>, ChartFormat)> {
-        let extra = fs.load_file("extra.json").await.ok().map(String::from_utf8).transpose()?;
-        let extra = if let Some(extra) = extra {
-            parse_extra(&extra, fs).await.context("Failed to parse extra")?
+        let total_start = Instant::now();
+        tracing::info!(chart = %info.chart, "chart load started");
+        let extra_source = fs.load_file("extra.json").await.ok().map(String::from_utf8).transpose()?;
+        let extra = if let Some(extra) = extra_source.as_deref() {
+            parse_extra(extra, fs).await.context("Failed to parse extra")?
         } else {
             ChartExtra::default()
         };
+        let source_start = Instant::now();
         let bytes = Self::load_chart_bytes(fs, info).await.context("Failed to load chart")?;
+        let source_load_ms = source_start.elapsed().as_secs_f32() * 1000.;
         let format = Self::infer_chart_format(info, &bytes);
-        let mut chart = match format {
-            ChartFormat::Rpe => parse_rpe(&String::from_utf8_lossy(&bytes), fs, extra, info.use_rpe_170_speed.unwrap_or_default()).await,
-            ChartFormat::Pgr => parse_phigros(&String::from_utf8_lossy(&bytes), extra),
-            ChartFormat::Pec => parse_pec(&String::from_utf8_lossy(&bytes), extra),
-            ChartFormat::Pbc => {
-                let mut r = BinaryReader::new(Cursor::new(&bytes));
-                r.read()
+        let options = ParseOptions {
+            use_rpe_170_speed: info.use_rpe_170_speed.unwrap_or_default(),
+        };
+        let parse_start = Instant::now();
+        let cache_path = (format != ChartFormat::Pbc).then(|| Self::pbc_cache_path(&format, &bytes, extra_source.as_deref(), options));
+        let mut chart = if let Some(cache_path) = cache_path.as_deref() {
+            if let Some(cache_bytes) = Self::load_pbc_cache(fs, cache_path).await {
+                tracing::trace!(path = cache_path, "loading chart from PBC cache");
+                match parse_chart_bytes(&cache_bytes, ChartFormat::Pbc, fs, ChartExtra::default(), options).await {
+                    Ok(mut chart) => {
+                        chart.extra = extra;
+                        Self::load_custom_hitsounds(&mut chart, fs).await?;
+                        chart
+                    }
+                    Err(err) => {
+                        tracing::warn!(path = cache_path, "failed to read PBC cache, falling back to source chart: {err:?}");
+                        let chart = parse_chart_bytes(&bytes, format.clone(), fs, extra, options).await?;
+                        Self::write_pbc_cache(fs, cache_path, &chart);
+                        chart
+                    }
+                }
+            } else {
+                let chart = parse_chart_bytes(&bytes, format.clone(), fs, extra, options).await?;
+                Self::write_pbc_cache(fs, cache_path, &chart);
+                chart
             }
-        }?;
+        } else {
+            let chart = parse_chart_bytes(&bytes, format.clone(), fs, extra, options).await?;
+            chart
+        };
+        if format == ChartFormat::Pbc {
+            Self::load_custom_hitsounds(&mut chart, fs).await?;
+        }
+        let parse_ms = parse_start.elapsed().as_secs_f32() * 1000.;
+        let texture_start = Instant::now();
         chart.load_textures(fs).await?;
+        let texture_load_ms = texture_start.elapsed().as_secs_f32() * 1000.;
         chart.settings.hold_partial_cover = info.hold_partial_cover;
+        let total_ms = total_start.elapsed().as_secs_f32() * 1000.;
+        tracing::info!(
+            total_ms,
+            source_load_ms,
+            parse_ms,
+            texture_load_ms,
+            "chart load finished"
+        );
         Ok((chart, bytes, format))
     }
 
@@ -347,6 +627,8 @@ impl GameScene {
             fps_last_frame_time: 0.0,
 
             dead: false,
+            hud_text: HudTextCache::default(),
+            static_cache: StaticRenderCache::default(),
         })
     }
 
@@ -365,23 +647,17 @@ impl GameScene {
         (screen_width() / screen_height()) / self.res.aspect_ratio
     }
 
+    fn gameplay_touches(&self) -> Vec<Touch> {
+        self.res
+            .camera
+            .viewport
+            .map(Judge::get_touches_in_viewport)
+            .unwrap_or_else(Judge::get_touches)
+    }
+
     fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
-        let time = tm.now();
-        let p = match self.state {
-            State::Starting => {
-                if time <= Self::BEFORE_TIME {
-                    1. - (1. - time / Self::BEFORE_TIME).powi(3)
-                } else {
-                    1.
-                }
-            }
-            State::BeforeMusic => 1.,
-            State::Playing => 1.,
-            State::Ending => {
-                let t = time - self.res.track_length - WAIT_TIME;
-                1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
-            }
-        } as f32;
+        let p = self.ui_progress(tm);
+        let touches = self.gameplay_touches();
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
@@ -391,7 +667,7 @@ impl GameScene {
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
-            && Judge::get_touches().iter().any(|touch| {
+            && touches.iter().any(|touch| {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
                     let p = Point::new(p.x, p.y);
@@ -427,7 +703,11 @@ impl GameScene {
             let h = 0.07;
             let score_top = top + eps * 2.2 - (1. - p) * 0.4;
             let score_right = 1. - margin;
-            let score = format!("{:07}", self.judge.score());
+            let score = self.hud_text.score(self.judge.score()).to_owned();
+            let accuracy = res
+                .config
+                .show_acc
+                .then(|| self.hud_text.accuracy(self.judge.real_time_accuracy()).to_owned());
             let scale_point = legacy_aui.then(|| {
                 let ct = ui.text(&score).size(0.8).measure_using(&PGR_FONT).center();
                 (score_right - ct.x, score_top + ct.y)
@@ -440,8 +720,8 @@ impl GameScene {
                         .size(0.8)
                         .color(c)
                         .draw_using(&PGR_FONT);
-                    if res.config.show_acc {
-                        ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
+                    if let Some(accuracy) = &accuracy {
+                        ui.text(accuracy)
                             .pos(1. - margin, score_top + h)
                             .anchor(1., 0.)
                             .size(0.4)
@@ -463,13 +743,15 @@ impl GameScene {
                     ui.fill_rect(r, c);
                 },
             );
-            if self.judge.combo() >= 3 {
+            let combo_value = self.judge.combo();
+            if combo_value >= 3 {
+                let combo = self.hud_text.combo(combo_value).to_owned();
                 if legacy_aui {
                     let combo_top = top + eps * 2. - (1. - p) * 0.4;
                     let btm = self
                         .chart
                         .with_element(ui, res, UIElement::ComboNumber, None, (0., combo_top + unit_h / 2.), |ui, c| {
-                            ui.text(self.judge.combo().to_string())
+                            ui.text(&combo)
                                 .pos(0., combo_top)
                                 .anchor(0.5, 0.)
                                 .color(c)
@@ -487,7 +769,6 @@ impl GameScene {
                                 .draw_using(&PGR_FONT);
                         });
                 } else {
-                    let combo = self.judge.combo().to_string();
                     let ct = ui.text(&combo).size(1.0).measure().center();
                     let combo_y = top + eps * 2. - (1. - p) * 0.4 + ct.y;
                     let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, None, (0., combo_y), |ui, c| {
@@ -551,6 +832,7 @@ impl GameScene {
 
     fn overlay_ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         let c = semi_white(self.res.alpha);
+        let touches = self.gameplay_touches();
         let res = &mut self.res;
         if tm.paused() {
             let h = 1. / res.aspect_ratio;
@@ -584,7 +866,7 @@ impl GameScene {
             );
             if res.config.interactive {
                 let mut clicked = None;
-                for touch in Judge::get_touches() {
+                for touch in &touches {
                     if touch.phase != TouchPhase::Started {
                         continue;
                     }
@@ -683,7 +965,7 @@ impl GameScene {
                 ui.fill_circle(st, -eh, rad, BLUE);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(st, -eh, 0., 0.).feather(rad));
-                    self.exercise_press = Judge::get_touches()
+                    self.exercise_press = touches
                         .iter()
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (-1, it.id));
@@ -692,7 +974,7 @@ impl GameScene {
                 ui.fill_circle(en, eh, rad, RED);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(en, eh, 0., 0.).feather(rad));
-                    self.exercise_press = Judge::get_touches()
+                    self.exercise_press = touches
                         .iter()
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (1, it.id));
@@ -701,14 +983,14 @@ impl GameScene {
                 ui.fill_circle(cur, 0., rad, GREEN);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(cur, 0., 0., 0.).feather(rad));
-                    self.exercise_press = Judge::get_touches()
+                    self.exercise_press = touches
                         .iter()
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (0, it.id));
                 }
                 ui.text(fmt_time(t as f32)).pos(0., -0.23).anchor(0.5, 0.).size(0.8).draw();
                 if let Some((ctrl, id)) = &self.exercise_press {
-                    if let Some(touch) = Judge::get_touches().iter().rfind(|it| it.id == *id) {
+                    if let Some(touch) = touches.iter().rfind(|it| it.id == *id) {
                         let x = touch.position.x;
                         let p = (x + hw) as f64 / (hw * 2.) as f64 * (self.res.track_length - sp) + sp;
                         let p = if self.res.track_length - sp <= 3. || *ctrl == 0 {
@@ -784,7 +1066,7 @@ impl GameScene {
             }
         }
         if self.res.config.touch_debug {
-            for touch in Judge::get_touches() {
+            for touch in &touches {
                 ui.fill_circle(touch.position.x, touch.position.y, 0.04, Color { a: 0.4, ..RED });
             }
         }
@@ -901,6 +1183,7 @@ impl Scene for GameScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
+        let _span = tracing::trace_span!("game_update").entered();
         self.res.audio.recover_if_needed()?;
         if matches!(self.state, State::Playing) {
             tm.update(self.music.position());
@@ -1052,8 +1335,10 @@ impl Scene for GameScene {
         self.res.time = time;
         if !tm.paused() && self.pause_rewind.is_none() && self.mode != GameMode::View {
             self.gl.quad_gl.viewport(self.res.camera.viewport);
+            let _span = tracing::trace_span!("judge_update").entered();
             self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes);
             self.gl.quad_gl.viewport(None);
+            drop(_span);
         }
         if let Some(update) = &mut self.update_fn {
             update(self.res.time, &mut self.res, &mut self.judge);
@@ -1170,6 +1455,8 @@ impl Scene for GameScene {
     }
 
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
+        let _span = tracing::trace_span!("game_render").entered();
+
         if self.res.config.show_avg_fps {
             let current_time = tm.real_time();
             if matches!(self.state, State::Playing) && !tm.paused() {
@@ -1180,60 +1467,63 @@ impl Scene for GameScene {
             self.fps_last_frame_time = current_time;
         }
 
-        let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        if res.update_size(ui.viewport) || self.mode == GameMode::View {
-            set_camera(&res.camera);
+        if self.res.update_size(ui.viewport) || self.mode == GameMode::View {
+            self.static_cache.background.invalidate();
+            set_camera(&self.res.camera);
         }
 
-        let msaa = res.config.sample_count > 1;
+        let msaa = self.res.config.sample_count > 1;
 
-        let chart_onto = res
+        let chart_onto = self
+            .res
             .chart_target
             .as_ref()
             .map(|it| if msaa { it.input() } else { it.output() })
-            .or(res.camera.render_target);
-        push_camera_state();
-        set_camera(&Camera2D {
-            zoom: vec2(1., -asp),
-            viewport: if res.chart_target.is_some() { None } else { Some(ui.viewport) },
-            render_target: chart_onto,
-            ..Default::default()
-        });
-        clear_background(BLACK);
-        draw_background(*res.background);
-        pop_camera_state();
+            .or(self.res.camera.render_target);
+        self.render_background(ui, asp, chart_onto);
 
-        let chart_target_vp = if res.chart_target.is_some() {
-            let vp = res.camera.viewport.unwrap();
-            Some((vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3))
+        let chart_target_vp = if self.res.chart_target.is_some() {
+            let vp = self.res.camera.viewport.unwrap();
+            let vp = (vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3);
+            self.res.chart_target.as_ref().map(|target| target.map_viewport(vp))
         } else {
-            res.camera.viewport
+            self.res.camera.viewport
         };
         self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
         self.gl.quad_gl.viewport(chart_target_vp);
 
-        let h = 1. / res.aspect_ratio;
-        draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        let h = 1. / self.res.aspect_ratio;
+        let background_dim = self.res.alpha * self.res.info.background_dim;
+        if background_dim > 0.001 {
+            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., background_dim));
+        }
 
-        self.chart.render(ui, res);
+        self.chart.render(ui, &mut self.res);
 
-        self.gl.quad_gl.render_pass(
-            res.chart_target
-                .as_ref()
-                .map(|it| it.output().render_pass)
-                .or_else(|| res.camera.render_pass()),
-        );
+        if self.res.chart_target.is_some() {
+            self.gl.quad_gl.render_pass(
+                self.res
+                    .chart_target
+                    .as_ref()
+                    .map(|it| it.output().render_pass)
+                    .or_else(|| self.res.camera.render_pass()),
+            );
+        }
 
-        self.bad_notes.retain(|dummy| dummy.render(res));
+        let mut bad_notes = std::mem::take(&mut self.bad_notes);
+        for mut dummy in bad_notes.drain(..) {
+            if dummy.render(&mut self.res) {
+                self.bad_notes.push(dummy);
+            }
+        }
         let t = tm.real_time();
         let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
-        if res.config.particle {
-            res.emitter.draw(dt);
+        if self.res.config.particle {
+            self.res.emitter.draw(dt);
         }
         self.ui(ui, tm)?;
         self.overlay_ui(ui, tm)?;
-
         if self.mode == GameMode::TweakOffset {
             push_camera_state();
             self.gl.quad_gl.viewport(None);
@@ -1247,6 +1537,7 @@ impl Scene for GameScene {
         }
 
         if !self.res.no_effect && !self.effects.is_empty() {
+            let _span = tracing::trace_span!("post_effect_render").entered();
             push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., asp),
@@ -1258,30 +1549,9 @@ impl Scene for GameScene {
             pop_camera_state();
         }
         if msaa || !self.res.no_effect {
-            // render the texture onto screen
-            if let Some(target) = &self.res.chart_target {
-                self.gl.flush();
-                push_camera_state();
-                self.gl.quad_gl.viewport(None);
-                set_camera(&Camera2D {
-                    zoom: vec2(1., asp),
-                    render_target: self.res.camera.render_target,
-                    viewport: Some(ui.viewport),
-                    ..Default::default()
-                });
-                draw_texture_ex(
-                    target.output().texture,
-                    -1.,
-                    -ui.top,
-                    WHITE,
-                    DrawTextureParams {
-                        dest_size: Some(vec2(2., ui.top * 2.)),
-                        ..Default::default()
-                    },
-                );
-                pop_camera_state();
-            }
+            self.blit_chart_target(ui, asp);
         }
+
         Ok(())
     }
 
@@ -1312,5 +1582,44 @@ impl Scene for GameScene {
         } else {
             NextScene::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_chart_format_uses_borrowed_text_bytes() {
+        let mut info = ChartInfo::default();
+        info.format = None;
+
+        assert_eq!(GameScene::infer_chart_format(&info, br#"{"META":{}}"#), ChartFormat::Rpe);
+        assert_eq!(GameScene::infer_chart_format(&info, br#"{"formatVersion":3}"#), ChartFormat::Pgr);
+        assert_eq!(GameScene::infer_chart_format(&info, b"0 1 2 3"), ChartFormat::Pec);
+        assert_eq!(GameScene::infer_chart_format(&info, &[0xff, 0x00]), ChartFormat::Pbc);
+    }
+
+    #[test]
+    fn infer_chart_format_respects_explicit_metadata() {
+        let mut info = ChartInfo::default();
+        info.format = Some(ChartFormat::Pbc);
+
+        assert_eq!(GameScene::infer_chart_format(&info, br#"{"META":{}}"#), ChartFormat::Pbc);
+    }
+
+    #[test]
+    fn pbc_cache_path_depends_on_bytes_format_and_options() {
+        let default_options = ParseOptions::default();
+        let speed_options = ParseOptions {
+            use_rpe_170_speed: true,
+        };
+
+        let first = GameScene::pbc_cache_path(&ChartFormat::Rpe, b"chart", None, default_options);
+        assert_eq!(first, GameScene::pbc_cache_path(&ChartFormat::Rpe, b"chart", None, default_options));
+        assert_ne!(first, GameScene::pbc_cache_path(&ChartFormat::Rpe, b"other", None, default_options));
+        assert_ne!(first, GameScene::pbc_cache_path(&ChartFormat::Pgr, b"chart", None, default_options));
+        assert_ne!(first, GameScene::pbc_cache_path(&ChartFormat::Rpe, b"chart", None, speed_options));
+        assert_ne!(first, GameScene::pbc_cache_path(&ChartFormat::Rpe, b"chart", Some("{}"), default_options));
     }
 }
