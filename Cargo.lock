@@ -2218,7 +2218,7 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 [[package]]
 name = "miniquad"
 version = "0.3.15"
-source = "git+https://github.com/Mivik/prpr-miniquad?rev=0c525a3#0c525a3e0e38a8ab3d6d41bd2749eb8b6f676e4c"
+source = "git+https://github.com/axycri7/prpr-miniquad?rev=b4af9f8#b4af9f898153601d6c8af5571848f52eddd9302b"
 dependencies = [
  "jni 0.21.1",
  "keyboard-types",
