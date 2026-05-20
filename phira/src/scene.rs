@@ -300,8 +300,8 @@ async fn lint_chart(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<ParseWa
     if format != ChartFormat::Rpe {
         return Ok(ParseWarnings::default());
     }
-    let source = String::from_utf8_lossy(&bytes);
-    prpr::parse::lint(&source).await
+    let source = std::str::from_utf8(&bytes).context("RPE chart is not valid UTF-8")?;
+    prpr::parse::lint(source).await
 }
 
 pub async fn import_chart_to(dir: &Path, local_path: String, file: File) -> Result<(LocalChart, ParseWarnings)> {
