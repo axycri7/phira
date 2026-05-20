@@ -4,6 +4,8 @@
 #   ./build-android.sh                        # build .so + repack + sign APK (default)
 #   SIGN_APK=0 ./build-android.sh             # build .so only
 #   TARGET=armv7-linux-androideabi ./build-android.sh
+#   ANGLE=0 ./build-android.sh                # disable bundled ANGLE injection
+#   ANGLE_RELEASE_REPO=owner/repo ./build-android.sh
 #
 # Outputs land in:
 #   target/android-<arch>/libphira.so
@@ -17,6 +19,8 @@ set -euo pipefail
 TARGET="${TARGET:-aarch64-linux-android}"
 SIGN_APK="${SIGN_APK:-1}"
 PKG_NAME="${PKG_NAME:-i7.axycr.phiradbg}"
+ANGLE="${ANGLE:-1}"
+ANGLE_RELEASE_REPO="${ANGLE_RELEASE_REPO:-axycri7/build-angle}"
 
 IMAGE="phira-android-builder"
 CONTAINER_NAME="phira-android-build"
@@ -97,6 +101,8 @@ DOCKER_ARGS=(
     -e "TARGET=${TARGET}"
     -e "SIGN_APK=${SIGN_APK}"
     -e "PKG_NAME=${PKG_NAME}"
+    -e "ANGLE=${ANGLE}"
+    -e "ANGLE_RELEASE_REPO=${ANGLE_RELEASE_REPO}"
 
     -v "$(pwd):/src"
     -v "${VOL_CARGO_REGISTRY}:/cargo/registry"

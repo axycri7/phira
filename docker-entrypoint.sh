@@ -4,6 +4,8 @@ set -euo pipefail
 TARGET="${TARGET:-aarch64-linux-android}"
 ANDROID_API="${ANDROID_API:-35}"
 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-nightly-2026-01-01}"
+ANGLE="${ANGLE:-1}"
+ANGLE_RELEASE_REPO="${ANGLE_RELEASE_REPO:-axycri7/build-angle}"
 
 # build.rs reads PRPR_AVC_LIBS and appends /<TARGET> to find the static libs.
 # The Dockerfile pre-downloaded them to /ffmpeg-libs/<TARGET>/.
@@ -12,6 +14,124 @@ export PRPR_AVC_LIBS="/ffmpeg-libs"
 # All outputs land in /out/<TARGET>/ on the host.
 OUT_DIR="/out/${TARGET}"
 mkdir -p "${OUT_DIR}"
+
+ANGLE_LIBS=(
+    libEGL_angle.so
+    libGLESv2_angle.so
+    libGLESv1_CM_angle.so
+    libEGL.so
+    libGLESv2.so
+    libGLESv1_CM.so
+)
+
+patch_angle_smali() {
+    local decode_dir="$1"
+    local prefer_angle="$2"
+    local angle_bool="0x0"
+    if [[ "${prefer_angle}" == "1" ]]; then
+        angle_bool="0x1"
+    fi
+
+    local quad_native_smali
+    quad_native_smali=$(find "${decode_dir}" -path "*/quad_native/QuadNative.smali" | head -n 1)
+    [[ -n "${quad_native_smali}" ]] || { echo "ERROR: quad_native/QuadNative.smali not found"; exit 1; }
+
+    local main_activity_smali
+    main_activity_smali=$(find "${decode_dir}" -path "*/MainActivity.smali" -print0 \
+        | xargs -0 -r grep -l 'Lquad_native/QuadNative;->initializeContext(Landroid/content/Context;)V' \
+        | head -n 1 || true)
+    [[ -n "${main_activity_smali}" ]] || {
+        echo "ERROR: MainActivity smali initializeContext(Context) call not found"
+        exit 1
+    }
+
+    sed -i \
+        's|initializeContext(Landroid/content/Context;)V|initializeContext(Landroid/content/Context;Z)V|g' \
+        "${quad_native_smali}"
+
+    sed -i \
+        "s|invoke-static {p0}, Lquad_native/QuadNative;->initializeContext(Landroid/content/Context;)V|const/4 v0, ${angle_bool}\\n\\n    invoke-static {p0, v0}, Lquad_native/QuadNative;->initializeContext(Landroid/content/Context;Z)V|" \
+        "${main_activity_smali}"
+
+    grep -q 'initializeContext(Landroid/content/Context;Z)V' "${quad_native_smali}" || {
+        echo "ERROR: failed to patch QuadNative.initializeContext signature"
+        exit 1
+    }
+    grep -q "const/4 v0, ${angle_bool}" "${main_activity_smali}" || {
+        echo "ERROR: failed to patch MainActivity ANGLE preference"
+        exit 1
+    }
+
+    echo "=== Patched Java smali ANGLE preference: ${prefer_angle} ==="
+}
+
+download_angle_libs_from_release() {
+    local abi_dir="$1"
+    local out_dir="$2"
+    local asset_arch
+
+    case "${abi_dir}" in
+        arm64-v8a) asset_arch="arm64-v8a" ;;
+        *)
+            echo "ERROR: bundled ANGLE release only supports arm64-v8a for now, got ${abi_dir}"
+            return 1
+            ;;
+    esac
+
+    mkdir -p "${out_dir}"
+
+    local zip_path="${out_dir}/angle.zip"
+    local extract_dir="${out_dir}/extract"
+
+    echo "=== Downloading latest ANGLE release from ${ANGLE_RELEASE_REPO} ==="
+    local latest_url
+    latest_url=$(curl -fsSL --retry 3 \
+        -A "phira-android-build" \
+        -o /dev/null \
+        -w "%{url_effective}" \
+        "https://github.com/${ANGLE_RELEASE_REPO}/releases/latest")
+
+    local latest_tag="${latest_url##*/}"
+    [[ -n "${latest_tag}" && "${latest_tag}" != "latest" ]] || {
+        echo "ERROR: could not resolve latest release tag from ${ANGLE_RELEASE_REPO}"
+        return 1
+    }
+
+    local asset_name="angle-android-${asset_arch}-${latest_tag}.zip"
+    local asset_url="https://github.com/${ANGLE_RELEASE_REPO}/releases/latest/download/${asset_name}"
+    echo "    Release: ${latest_tag}"
+    echo "    URL: ${asset_url}"
+    curl -fL --retry 3 \
+        -A "phira-android-build" \
+        -o "${zip_path}" \
+        "${asset_url}"
+
+    rm -rf "${extract_dir}"
+    mkdir -p "${extract_dir}"
+    unzip -q "${zip_path}" -d "${extract_dir}"
+
+    local lib_dir="${extract_dir}/angle-android-${asset_arch}/lib"
+    [[ -d "${lib_dir}" ]] || {
+        echo "ERROR: ANGLE zip missing angle-android-${asset_arch}/lib"
+        return 1
+    }
+
+    cp "${lib_dir}/libEGL.so" "${out_dir}/libEGL.so"
+    cp "${lib_dir}/libEGL.so" "${out_dir}/libEGL_angle.so"
+    cp "${lib_dir}/libGLESv2.so" "${out_dir}/libGLESv2.so"
+    cp "${lib_dir}/libGLESv2.so" "${out_dir}/libGLESv2_angle.so"
+    cp "${lib_dir}/libGLESv1_CM.so" "${out_dir}/libGLESv1_CM.so"
+    cp "${lib_dir}/libGLESv1_CM.so" "${out_dir}/libGLESv1_CM_angle.so"
+
+    for lib in "${ANGLE_LIBS[@]}"; do
+        [[ -s "${out_dir}/${lib}" ]] || {
+            echo "ERROR: missing or empty ANGLE lib ${out_dir}/${lib}"
+            return 1
+        }
+    done
+
+    echo "=== Using ANGLE libraries from ${ANGLE_RELEASE_REPO} latest release ==="
+}
 
 echo "=== Building libphira.so for ${TARGET} ==="
 cargo +${RUST_TOOLCHAIN} ndk \
@@ -83,9 +203,26 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
     DECODE_DIR="${WORK_DIR}/decoded"
     apktool d -f -o "${DECODE_DIR}" /apk/input.apk
 
+    # ── Patch Java layer smali ────────────────────────────────────────────────
+    # The current flow repacks an existing APK, so Java sources are not compiled.
+    # Patch the decoded DEX smali to call the updated native initializeContext
+    # hook with the build-time ANGLE preference.
+    patch_angle_smali "${DECODE_DIR}" "${ANGLE}"
+
     # ── Replace native library ────────────────────────────────────────────────
     mkdir -p "${DECODE_DIR}/lib/${ABI_DIR}"
     cp "${SO_SRC}" "${DECODE_DIR}/lib/${ABI_DIR}/libphira.so"
+
+    if [[ "${ANGLE}" == "1" ]]; then
+        echo "=== Injecting bundled ANGLE libraries ==="
+        ANGLE_SRC_DIR="${WORK_DIR}/angle-libs"
+        download_angle_libs_from_release "${ABI_DIR}" "${ANGLE_SRC_DIR}"
+        for lib in "${ANGLE_LIBS[@]}"; do
+            [[ -f "${ANGLE_SRC_DIR}/${lib}" ]] || { echo "ERROR: missing ANGLE lib ${ANGLE_SRC_DIR}/${lib}"; exit 1; }
+            [[ -s "${ANGLE_SRC_DIR}/${lib}" ]] || { echo "ERROR: empty ANGLE lib ${ANGLE_SRC_DIR}/${lib}"; exit 1; }
+            cp "${ANGLE_SRC_DIR}/${lib}" "${DECODE_DIR}/lib/${ABI_DIR}/${lib}"
+        done
+    fi
 
     # ── Rename package ────────────────────────────────────────────────────────
     PKG_NEW="${PKG_NAME:-org.flos.phira}"
