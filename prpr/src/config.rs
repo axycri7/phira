@@ -47,6 +47,53 @@ impl Mods {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum EffectQuality {
+    High,
+    Medium,
+    Low,
+}
+
+impl Default for EffectQuality {
+    fn default() -> Self {
+        Self::High
+    }
+}
+
+impl EffectQuality {
+    pub fn next(self) -> Self {
+        match self {
+            Self::High => Self::Medium,
+            Self::Medium => Self::Low,
+            Self::Low => Self::High,
+        }
+    }
+
+    pub fn effect_render_scale(self) -> f32 {
+        match self {
+            Self::High => 1.,
+            Self::Medium => 0.75,
+            Self::Low => 0.5,
+        }
+    }
+
+    pub fn hit_particle_count(self, default: usize) -> usize {
+        match self {
+            Self::High => default,
+            Self::Medium => default.div_ceil(2),
+            Self::Low => 0,
+        }
+    }
+
+    pub fn hit_particle_lifetime_scale(self) -> f32 {
+        match self {
+            Self::High => 1.,
+            Self::Medium => 0.75,
+            Self::Low => 0.55,
+        }
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +108,7 @@ pub struct Config {
     pub disable_effect: bool,
     pub double_click_to_pause: bool,
     pub double_hint: bool,
+    pub effect_quality: EffectQuality,
     pub fullscreen_mode: bool,
     pub fxaa: bool,
     pub interactive: bool,
@@ -101,6 +149,7 @@ impl Default for Config {
             disable_effect: false,
             double_click_to_pause: true,
             double_hint: true,
+            effect_quality: EffectQuality::High,
             fxaa: false,
             interactive: true,
             mods: Mods::default(),
@@ -155,5 +204,10 @@ impl Config {
     #[inline]
     pub fn flip_x(&self) -> bool {
         self.has_mod(Mods::FLIP_X)
+    }
+
+    #[inline]
+    pub fn effect_quality_scale(&self) -> f32 {
+        self.effect_quality.effect_render_scale()
     }
 }
