@@ -152,6 +152,13 @@ impl<'a, 's, 'ui> DrawText<'a, 's, 'ui> {
         let line_height = if self.baseline { font.ascent() } else { font.height() };
 
         if !self.multiline {
+            if self.max_width.is_none() {
+                let last = painter.brush.glyphs(section.clone()).last().cloned();
+                let width = last
+                    .map(|glyph| glyph.glyph.position.x + painter.brush.fonts()[glyph.font_id].as_scaled(scale).h_advance(glyph.glyph.id))
+                    .unwrap_or_default();
+                return (section, (0., 0., width, line_height));
+            }
             let bounds = section.bounds;
             let bounds = ab_glyph::Rect {
                 min: ab_glyph::Point { x: 0., y: 0. },
