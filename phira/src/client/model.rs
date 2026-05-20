@@ -16,7 +16,7 @@ pub use record::*;
 mod user;
 pub use user::*;
 
-use super::{basic_client_builder, Client, API_URL, CLIENT_TOKEN};
+use super::{request_url, Client, API_URL};
 use crate::{
     dir, get_data,
     images::{THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH},
@@ -30,6 +30,7 @@ use reqwest::Response;
 use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer};
 use std::{
     any::Any,
+    borrow::Cow,
     collections::HashMap,
     marker::PhantomData,
     sync::{Arc, Mutex},
@@ -182,21 +183,16 @@ pub struct File {
 }
 impl File {
     fn request(&self) -> reqwest::RequestBuilder {
-        let mut req = basic_client_builder().build().unwrap().get(&self.url);
+        let mut url = Cow::Borrowed(self.url.as_str());
         // TODO: thread safety?
         if get_data().enable_anys {
             if let Some(path) = self.url.strip_prefix(API_URL) {
                 if let Some(rest_path) = path.strip_prefix("/files/") {
-                    let url = format!("{API_URL}/anys/{rest_path}");
-                    req = basic_client_builder().build().unwrap().get(url);
+                    url = Cow::Owned(format!("{API_URL}/anys/{rest_path}"));
                 }
             }
         }
-        if let Some(token) = CLIENT_TOKEN.load().as_ref() {
-            req.header("Authorization", format!("Bearer {token}"))
-        } else {
-            req
-        }
+        request_url(url.as_ref())
     }
 
     pub async fn fetch(&self) -> Result<Bytes> {
