@@ -500,6 +500,19 @@ pub fn set_chosen_file(file: String) {
     CHOSEN_FILE.lock().unwrap().1 = Some(file);
 }
 
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_quad_1native_QuadNative_preprocessInput(
+    _env: *mut std::ffi::c_void,
+    _class: *const std::ffi::c_void,
+    _motion_event: *mut std::ffi::c_void,
+    _f: f32,
+    _f2: f32,
+    _z: u8,
+    _z2: u8,
+) {
+}
+
 #[cfg(target_env = "ohos")]
 #[napi]
 pub fn mark_auto_import() {

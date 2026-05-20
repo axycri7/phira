@@ -33,9 +33,10 @@ inner.rs
 # Test
 
 /test
+/apk
 /log*
 /build_event_debug.sh
-
+*.log
 
 # OHOS
 
