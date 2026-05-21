@@ -1,11 +1,11 @@
-# Build phira libphira.so for aarch64-linux-android
+# Build phira libphira.so for Android targets
 # Must run as linux/amd64 — Android SDK/NDK tooling requires x86_64
 FROM --platform=linux/amd64 ubuntu:22.04
 
 ARG ANDROID_NDK_VERSION=r27c
 ARG ANDROID_API=35
 ARG RUST_TOOLCHAIN=nightly-2026-01-01
-ARG TARGET=aarch64-linux-android
+ARG ANDROID_TARGETS="aarch64-linux-android armv7-linux-androideabi"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ANDROID_HOME=/opt/android-sdk
@@ -55,19 +55,21 @@ RUN curl -fsSL https://sh.rustup.rs | \
         --profile minimal \
         --component rustfmt \
         --component clippy && \
-    rustup target add ${TARGET} --toolchain ${RUST_TOOLCHAIN} && \
+    rustup target add ${ANDROID_TARGETS} --toolchain ${RUST_TOOLCHAIN} && \
     cargo install cargo-ndk --locked
 
 WORKDIR /src
 
-# Download FFmpeg static libs for the Android target.
+# Download FFmpeg static libs for all supported Android targets.
 # Uses the latest release so this stays current without manual version bumps.
-RUN mkdir -p /ffmpeg-libs/${TARGET} && \
-    curl -fL --retry 3 \
-        -o /tmp/ffmpeg.tar.gz \
-        "https://github.com/TeamFlos/prpr-avc-ffmpeg/releases/latest/download/${TARGET}.tar.gz" && \
-    tar -xzf /tmp/ffmpeg.tar.gz -C /ffmpeg-libs/${TARGET} && \
-    rm /tmp/ffmpeg.tar.gz
+RUN for target in ${ANDROID_TARGETS}; do \
+        mkdir -p "/ffmpeg-libs/${target}" && \
+        curl -fL --retry 3 \
+            -o /tmp/ffmpeg.tar.gz \
+            "https://github.com/TeamFlos/prpr-avc-ffmpeg/releases/latest/download/${target}.tar.gz" && \
+        tar -xzf /tmp/ffmpeg.tar.gz -C "/ffmpeg-libs/${target}" && \
+        rm /tmp/ffmpeg.tar.gz; \
+    done
 
 # Signing tools + apktool
 RUN apt-get update && apt-get install -y --no-install-recommends \

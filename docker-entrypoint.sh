@@ -5,6 +5,15 @@ TARGET="${TARGET:-aarch64-linux-android}"
 ANDROID_API="${ANDROID_API:-35}"
 RUST_TOOLCHAIN="${RUST_TOOLCHAIN:-nightly-2026-01-01}"
 
+case "${TARGET}" in
+    aarch64-linux-android | armv7-linux-androideabi) ;;
+    *)
+        echo "ERROR: unsupported TARGET=${TARGET}" >&2
+        echo "Supported targets: aarch64-linux-android, armv7-linux-androideabi" >&2
+        exit 1
+        ;;
+esac
+
 # build.rs reads PRPR_AVC_LIBS and appends /<TARGET> to find the static libs.
 # The Dockerfile pre-downloaded them to /ffmpeg-libs/<TARGET>/.
 export PRPR_AVC_LIBS="/ffmpeg-libs"
@@ -28,20 +37,20 @@ echo "=== Copied to ${SO_OUT} ==="
 
 # ── APK repack + sign ─────────────────────────────────────────────────────────
 # Activated when SIGN_APK=1.  Requires:
-#   /apk/input.apk   — base APK (auto-downloaded if absent)
+#   ${APK_INPUT:-/apk/input.apk} — base APK (auto-downloaded if absent)
 #   /keystore/keystore.jks + keystore.env
 
 if [[ "${SIGN_APK:-0}" == "1" ]]; then
     echo "=== Repacking and signing APK ==="
+    APK_INPUT="${APK_INPUT:-/apk/input.apk}"
 
     # Auto-download the latest official release APK if not provided by the host.
-    if [[ ! -f /apk/input.apk ]]; then
-        echo "=== /apk/input.apk not found — downloading latest release APK ==="
+    if [[ ! -f "${APK_INPUT}" ]]; then
+        echo "=== ${APK_INPUT} not found — downloading latest release APK ==="
         # Pick the APK asset matching the current TARGET architecture.
         case "${TARGET}" in
             aarch64-linux-android)  APK_ARCH="arm64-v8a" ;;
             armv7-linux-androideabi) APK_ARCH="armeabi-v7a" ;;
-            x86_64-linux-android)   APK_ARCH="x86_64" ;;
             *)                      APK_ARCH="arm64-v8a" ;;
         esac
         LATEST_APK_URL=$(curl -fsSL "https://api.github.com/repos/TeamFlos/phira/releases/latest" \
@@ -54,11 +63,11 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
             ')
         [[ -n "${LATEST_APK_URL}" ]] || { echo "ERROR: could not find ${APK_ARCH} APK in latest release"; exit 1; }
         echo "    URL: ${LATEST_APK_URL}"
-        curl -fL --retry 3 -o /apk/input.apk "${LATEST_APK_URL}"
-        echo "=== Downloaded to /apk/input.apk ==="
+        curl -fL --retry 3 -o "${APK_INPUT}" "${LATEST_APK_URL}"
+        echo "=== Downloaded to ${APK_INPUT} ==="
     fi
 
-    [[ -f /apk/input.apk ]]        || { echo "ERROR: /apk/input.apk not found"; exit 1; }
+    [[ -f "${APK_INPUT}" ]]        || { echo "ERROR: ${APK_INPUT} not found"; exit 1; }
     [[ -f /keystore/keystore.jks ]] || { echo "ERROR: /keystore/keystore.jks not found"; exit 1; }
     [[ -f /keystore/keystore.env ]] || { echo "ERROR: /keystore/keystore.env not found"; exit 1; }
 
@@ -75,13 +84,12 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
     case "${TARGET}" in
         aarch64-linux-android)   ABI_DIR="arm64-v8a" ;;
         armv7-linux-androideabi) ABI_DIR="armeabi-v7a" ;;
-        x86_64-linux-android)   ABI_DIR="x86_64" ;;
         *)                       ABI_DIR="arm64-v8a" ;;
     esac
 
     # ── Decode APK with apktool ───────────────────────────────────────────────
     DECODE_DIR="${WORK_DIR}/decoded"
-    apktool d -f -o "${DECODE_DIR}" /apk/input.apk
+    apktool d -f -o "${DECODE_DIR}" "${APK_INPUT}"
 
     # ── Replace native library ────────────────────────────────────────────────
     mkdir -p "${DECODE_DIR}/lib/${ABI_DIR}"
