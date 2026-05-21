@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# build-android.sh — build phira for Android
+# build_android.sh — build phira for Android
 # Usage:
-#   ./build-android.sh                        # build .so + repack + sign APK (default)
-#   SIGN_APK=0 ./build-android.sh             # build .so only
-#   TARGET=armv7-linux-androideabi ./build-android.sh
+#   ./build_android.sh                        # build arm64 .so + repack + sign APK (default)
+#   SIGN_APK=0 ./build_android.sh             # build .so only
+#   TARGET=armv7-linux-androideabi ./build_android.sh
+#   TARGET=ALL ./build_android.sh             # build arm64 + arm32 APKs
 #
 # Outputs land in:
 #   target/android-<arch>/libphira.so
@@ -11,7 +12,8 @@
 #   target/android-<arch>/phira-signed.apk
 #
 # On first run a signing key is auto-generated in the "phira-keystore" volume.
-# If ./apk/input.apk is absent the base APK is downloaded automatically.
+# If ./apk/input.apk is absent, single-target builds download the base APK automatically.
+# TARGET=ALL uses per-ABI caches: ./apk/input-arm64.apk and ./apk/input-arm32.apk.
 set -euo pipefail
 
 TARGET="${TARGET:-aarch64-linux-android}"
@@ -20,16 +22,33 @@ PKG_NAME="${PKG_NAME:-i7.axycr.phiradbg}"
 
 IMAGE="phira-android-builder"
 CONTAINER_NAME="phira-android-build"
+SUPPORTED_TARGETS=(
+    "aarch64-linux-android"
+    "armv7-linux-androideabi"
+)
 
-# Derive a short arch label for the output directory (android-arm64, etc.)
-case "${TARGET}" in
-    aarch64-linux-android)   ARCH_LABEL="arm64" ;;
-    armv7-linux-androideabi) ARCH_LABEL="arm32" ;;
-    x86_64-linux-android)   ARCH_LABEL="x86_64" ;;
-    *)                       ARCH_LABEL="${TARGET}" ;;
-esac
-OUT_DIR="$(pwd)/target/android-${ARCH_LABEL}"
-mkdir -p "${OUT_DIR}"
+arch_label_for_target() {
+    case "$1" in
+        aarch64-linux-android)   echo "arm64" ;;
+        armv7-linux-androideabi) echo "arm32" ;;
+        *)
+            echo "ERROR: unsupported TARGET=$1" >&2
+            echo "Supported targets:" >&2
+            echo "  aarch64-linux-android" >&2
+            echo "  armv7-linux-androideabi" >&2
+            echo "  ALL" >&2
+            exit 1
+            ;;
+    esac
+}
+
+if [[ "${TARGET}" == "ALL" ]]; then
+    BUILD_TARGETS=("${SUPPORTED_TARGETS[@]}")
+else
+    # Validate early and normalize to an array so the rest of the script has one path.
+    arch_label_for_target "${TARGET}" > /dev/null
+    BUILD_TARGETS=("${TARGET}")
+fi
 
 # ── Volume names (persist across builds) ─────────────────────────────────────
 VOL_CARGO_REGISTRY="phira-cargo-registry"
@@ -89,40 +108,66 @@ for vol in \
     docker volume inspect "${vol}" > /dev/null 2>&1 || docker volume create "${vol}"
 done
 
-# ── Run the build ─────────────────────────────────────────────────────────────
-DOCKER_ARGS=(
-    --rm
-    --name "${CONTAINER_NAME}"
-    --platform linux/amd64
-    -e "TARGET=${TARGET}"
-    -e "SIGN_APK=${SIGN_APK}"
-    -e "PKG_NAME=${PKG_NAME}"
+run_android_build() {
+    local build_target="$1"
+    local arch_label
+    local out_dir
+    local apk_input
 
-    -v "$(pwd):/src"
-    -v "${VOL_CARGO_REGISTRY}:/cargo/registry"
-    -v "${VOL_CARGO_GIT}:/cargo/git"
-    -v "${VOL_RUST_TARGET}:/src/target"
-    -v "${VOL_ANDROID_SDK}:/opt/android-sdk"
-    -v "${VOL_ANDROID_NDK}:/opt/android-ndk-r27c"
-    -v "${VOL_KEYSTORE}:/keystore"
+    arch_label="$(arch_label_for_target "${build_target}")"
+    out_dir="$(pwd)/target/android-${arch_label}"
+    mkdir -p "${out_dir}"
 
-    # Output dir: host target/android-<arch>/ ↔ container /out/<TARGET>/
-    -v "${OUT_DIR}:/out/${TARGET}"
-)
+    DOCKER_ARGS=(
+        --rm
+        --name "${CONTAINER_NAME}-${arch_label}"
+        --platform linux/amd64
+        -e "TARGET=${build_target}"
+        -e "SIGN_APK=${SIGN_APK}"
+        -e "PKG_NAME=${PKG_NAME}"
 
-if [[ "${SIGN_APK}" == "1" ]]; then
-    # ./apk/input.apk is optional — entrypoint downloads it if absent
-    mkdir -p "$(pwd)/apk"
-    DOCKER_ARGS+=(-v "$(pwd)/apk:/apk")
-fi
+        -v "$(pwd):/src"
+        -v "${VOL_CARGO_REGISTRY}:/cargo/registry"
+        -v "${VOL_CARGO_GIT}:/cargo/git"
+        -v "${VOL_RUST_TARGET}:/src/target"
+        -v "${VOL_ANDROID_SDK}:/opt/android-sdk"
+        -v "${VOL_ANDROID_NDK}:/opt/android-ndk-r27c"
+        -v "${VOL_KEYSTORE}:/keystore"
 
-echo "=== Starting build container ==="
-docker run "${DOCKER_ARGS[@]}" "${IMAGE}"
+        # Output dir: host target/android-<arch>/ ↔ container /out/<TARGET>/
+        -v "${out_dir}:/out/${build_target}"
+    )
 
-echo ""
-echo "=== Done ==="
-echo "    .so          → target/android-${ARCH_LABEL}/libphira.so"
-if [[ "${SIGN_APK}" == "1" ]]; then
-    echo "    unsigned APK → target/android-${ARCH_LABEL}/phira-unsigned.apk"
-    echo "    signed APK   → target/android-${ARCH_LABEL}/phira-signed.apk"
+    if [[ "${SIGN_APK}" == "1" ]]; then
+        mkdir -p "$(pwd)/apk"
+        if [[ "${TARGET}" == "ALL" ]]; then
+            apk_input="/apk/input-${arch_label}.apk"
+        else
+            apk_input="/apk/input.apk"
+        fi
+        DOCKER_ARGS+=(
+            -e "APK_INPUT=${apk_input}"
+            -v "$(pwd)/apk:/apk"
+        )
+    fi
+
+    echo "=== Starting build container for ${build_target} (${arch_label}) ==="
+    docker run "${DOCKER_ARGS[@]}" "${IMAGE}"
+
+    echo ""
+    echo "=== Done: ${build_target} ==="
+    echo "    .so          → target/android-${arch_label}/libphira.so"
+    if [[ "${SIGN_APK}" == "1" ]]; then
+        echo "    unsigned APK → target/android-${arch_label}/phira-unsigned.apk"
+        echo "    signed APK   → target/android-${arch_label}/phira-signed.apk"
+    fi
+}
+
+for build_target in "${BUILD_TARGETS[@]}"; do
+    run_android_build "${build_target}"
+done
+
+if [[ "${TARGET}" == "ALL" ]]; then
+    echo ""
+    echo "=== All Android targets done ==="
 fi
