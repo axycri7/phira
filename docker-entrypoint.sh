@@ -141,7 +141,6 @@ download_angle_libs_from_release() {
 
     echo "=== Using ANGLE libraries from ${ANGLE_RELEASE_REPO} latest release ==="
 }
-
 echo "=== Building libphira.so for ${TARGET} ==="
 cargo +${RUST_TOOLCHAIN} ndk \
     -t ${TARGET} \
@@ -173,17 +172,26 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
             armv7-linux-androideabi) APK_ARCH="armeabi-v7a" ;;
             *)                      APK_ARCH="arm64-v8a" ;;
         esac
-        LATEST_APK_URL=$(curl -fsSL "https://api.github.com/repos/TeamFlos/phira/releases/latest" \
-            | jq -r --arg arch "${APK_ARCH}" '
-                first(
-                    .assets[]
-                    | select(.browser_download_url | test($arch + "\\.apk$"))
-                    | .browser_download_url
-                ) // empty
-            ')
+        RELEASE_JSON=$(mktemp)
+        APK_TMP="${APK_INPUT}.tmp"
+        trap 'rm -f "${RELEASE_JSON}" "${APK_TMP}"' EXIT
+        curl --no-alpn -fsSL --retry 5 --retry-all-errors \
+            -o "${RELEASE_JSON}" \
+            "https://api.github.com/repos/TeamFlos/phira/releases/latest"
+        LATEST_APK_URL=$(jq -r --arg arch "${APK_ARCH}" '
+            first(
+                .assets[]
+                | select(.name | test("^Phira-android-" + $arch + "-.*[.]apk$"))
+                | .browser_download_url
+            ) // empty
+        ' "${RELEASE_JSON}")
+        rm -f "${RELEASE_JSON}"
         [[ -n "${LATEST_APK_URL}" ]] || { echo "ERROR: could not find ${APK_ARCH} APK in latest release"; exit 1; }
         echo "    URL: ${LATEST_APK_URL}"
-        curl -fL --retry 3 -o "${APK_INPUT}" "${LATEST_APK_URL}"
+        curl --no-alpn -fL --retry 5 --retry-all-errors \
+            -o "${APK_TMP}" "${LATEST_APK_URL}"
+        mv "${APK_TMP}" "${APK_INPUT}"
+        trap - EXIT
         echo "=== Downloaded to ${APK_INPUT} ==="
     fi
 
@@ -216,7 +224,6 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
     # Patch the decoded DEX smali to call the updated native initializeContext
     # hook with the build-time ANGLE preference.
     patch_angle_smali "${DECODE_DIR}" "${ANGLE}"
-
     # ── Replace native library ────────────────────────────────────────────────
     mkdir -p "${DECODE_DIR}/lib/${ABI_DIR}"
     cp "${SO_SRC}" "${DECODE_DIR}/lib/${ABI_DIR}/libphira.so"
@@ -231,7 +238,6 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
             cp "${ANGLE_SRC_DIR}/${lib}" "${DECODE_DIR}/lib/${ABI_DIR}/${lib}"
         done
     fi
-
     # ── Rename package ────────────────────────────────────────────────────────
     PKG_NEW="${PKG_NAME:-org.flos.phira}"
     PKG_OLD=$(grep -m1 'package=' "${DECODE_DIR}/AndroidManifest.xml" \
