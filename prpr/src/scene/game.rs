@@ -372,7 +372,11 @@ impl GameScene {
     }
 
     fn render_background(&mut self, ui: &Ui, asp: f32, chart_onto: Option<RenderTarget>) {
-        let dim = (ui.viewport.2 as u32, ui.viewport.3 as u32);
+        let scale = self.res.config.effect_quality.effect_render_scale();
+        let dim = (
+            ((ui.viewport.2 as f32) * scale).round().max(1.) as u32,
+            ((ui.viewport.3 as f32) * scale).round().max(1.) as u32,
+        );
         let content_key = (*self.res.background)
             .raw_miniquad_texture_handle()
             .gl_internal_id() as u64;
