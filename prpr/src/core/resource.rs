@@ -594,16 +594,17 @@ impl Resource {
     }
 
     pub fn update_size(&mut self, vp: (i32, i32, i32, i32)) -> bool {
-        let target_dim = if !self.no_effect && self.config.sample_count == 1 {
-            let scale = self.config.effect_quality_scale();
-            (
-                ((vp.2 as f32) * scale).round().max(1.) as u32,
-                ((vp.3 as f32) * scale).round().max(1.) as u32,
-            )
+        let need_target = !self.no_effect || self.config.sample_count != 1;
+        let scale = if !self.no_effect {
+            self.config.effect_quality.effect_render_scale()
         } else {
-            (vp.2 as u32, vp.3 as u32)
+            1.
         };
-        let target_ready = if !self.no_effect || self.config.sample_count != 1 {
+        let target_dim = (
+            ((vp.2 as f32) * scale).round().max(1.) as u32,
+            ((vp.3 as f32) * scale).round().max(1.) as u32,
+        );
+        let target_ready = if need_target {
             self.chart_target
                 .as_ref()
                 .is_some_and(|target| target.texture_dim() == target_dim && target.samples() == self.config.sample_count)
@@ -614,16 +615,12 @@ impl Resource {
             return false;
         }
         self.last_vp = vp;
-        if !self.no_effect || self.config.sample_count != 1 {
-            self.chart_target = Some(if self.config.sample_count == 1 {
-                MSRenderTarget::new_scaled(
-                    (vp.2 as u32, vp.3 as u32),
-                    target_dim,
-                    self.config.sample_count,
-                )
-            } else {
-                MSRenderTarget::new((vp.2 as u32, vp.3 as u32), self.config.sample_count)
-            });
+        if need_target {
+            self.chart_target = Some(MSRenderTarget::new_scaled(
+                (vp.2 as u32, vp.3 as u32),
+                target_dim,
+                self.config.sample_count,
+            ));
         } else {
             self.chart_target = None;
         }

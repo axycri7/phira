@@ -51,8 +51,8 @@ impl MSRenderTarget {
                 GL_RENDERBUFFER,
                 samples as _,
                 GL_RGB8,
-                logical_dim.0 as _,
-                logical_dim.1 as _,
+                texture_dim.0 as _,
+                texture_dim.1 as _,
             );
             glGenFramebuffers(1, &mut fbo as *mut _);
             glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -92,7 +92,7 @@ impl MSRenderTarget {
     }
 
     pub fn blit(&self) {
-        copy_fbo(self.fbo, internal_id(self.output[0].unwrap()), self.logical_dim);
+        copy_fbo(self.fbo, internal_id(self.output[0].unwrap()), self.texture_dim);
     }
 
     pub fn swap(&mut self) {
@@ -245,6 +245,15 @@ impl NoteBuffer {
             }
         }
     }
+
+    #[cfg(test)]
+    fn buffered_quad_count(&self) -> usize {
+        self.batches
+            .values()
+            .flat_map(|meshes| meshes.iter())
+            .map(|mesh| mesh.vertices.len() / 4)
+            .sum()
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +291,16 @@ mod tests {
         buffer.push_quad((0, 1), vertices());
         assert_eq!(buffer.batches[&(0, 1)].len(), 1);
         assert_eq!(buffer.batches[&(0, 1)][0].vertices.len(), 4);
+    }
+
+    #[test]
+    fn note_buffer_keeps_quads_added_before_frame_flush() {
+        let mut buffer = NoteBuffer::default();
+        buffer.begin_frame();
+        buffer.push_quad((0, 1), vertices());
+        buffer.push_quad((1, 2), vertices());
+
+        assert_eq!(buffer.buffered_quad_count(), 2);
     }
 
     #[test]

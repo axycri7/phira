@@ -206,8 +206,4 @@ impl Config {
         self.has_mod(Mods::FLIP_X)
     }
 
-    #[inline]
-    pub fn effect_quality_scale(&self) -> f32 {
-        self.effect_quality.effect_render_scale()
-    }
 }
