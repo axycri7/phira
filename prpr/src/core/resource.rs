@@ -1,6 +1,6 @@
 use super::{MSRenderTarget, Matrix, NoteBuffer, Point, NOTE_WIDTH_RATIO_BASE};
 use crate::{
-    config::{Config, EffectQuality},
+    config::Config,
     ext::{create_audio_manger, nalgebra_to_glm, SafeTexture},
     fs::FileSystem,
     info::ChartInfo,
@@ -303,21 +303,6 @@ pub struct ParticleEmitter {
     pub hide_particles: bool,
 }
 
-#[derive(Clone, Copy)]
-pub struct HitParticleParams {
-    pub extra_count: usize,
-    pub lifetime_scale: f32,
-}
-
-impl HitParticleParams {
-    fn for_gameplay_quality(quality: EffectQuality) -> Self {
-        Self {
-            extra_count: quality.hit_particle_count(4),
-            lifetime_scale: quality.hit_particle_lifetime_scale(),
-        }
-    }
-}
-
 impl ParticleEmitter {
     pub fn new(res_pack: &ResourcePack, scale: f32, hide_particles: bool) -> Result<Self> {
         let colors_curve = {
@@ -363,31 +348,13 @@ impl ParticleEmitter {
     }
 
     pub fn emit_at(&mut self, pt: Vec2, rotation: f32, color: Color) {
-        self.emit_at_with_params(
-            pt,
-            rotation,
-            color,
-            HitParticleParams {
-                extra_count: 4,
-                lifetime_scale: 1.,
-            },
-        );
-    }
-
-    pub fn emit_at_with_params(&mut self, pt: Vec2, rotation: f32, color: Color, params: HitParticleParams) {
-        let emitter_lifetime = self.emitter.config.lifetime;
-        let square_lifetime = self.emitter_square.config.lifetime;
-        self.emitter.config.lifetime = emitter_lifetime * params.lifetime_scale;
-        self.emitter_square.config.lifetime = square_lifetime * params.lifetime_scale;
         self.emitter.config.initial_rotation = rotation;
         self.emitter.config.base_color = color;
         self.emitter.emit(pt, 1);
-        if !self.hide_particles && params.extra_count != 0 {
+        if !self.hide_particles {
             self.emitter_square.config.base_color = color;
-            self.emitter_square.emit(pt, params.extra_count);
+            self.emitter_square.emit(pt, 4);
         }
-        self.emitter.config.lifetime = emitter_lifetime;
-        self.emitter_square.config.lifetime = square_lifetime;
     }
 
     pub fn draw(&mut self, dt: f32) {
@@ -584,13 +551,7 @@ impl Resource {
         } else {
             0.
         };
-        // Lower quality levels reduce transparent overdraw from decorative hit particles.
-        self.emitter.emit_at_with_params(
-            pt,
-            rotation,
-            color,
-            HitParticleParams::for_gameplay_quality(self.config.effect_quality),
-        );
+        self.emitter.emit_at(pt, rotation, color);
     }
 
     pub fn update_size(&mut self, vp: (i32, i32, i32, i32)) -> bool {

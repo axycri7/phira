@@ -77,21 +77,6 @@ impl EffectQuality {
         }
     }
 
-    pub fn hit_particle_count(self, default: usize) -> usize {
-        match self {
-            Self::High => default,
-            Self::Medium => default.div_ceil(2),
-            Self::Low => 0,
-        }
-    }
-
-    pub fn hit_particle_lifetime_scale(self) -> f32 {
-        match self {
-            Self::High => 1.,
-            Self::Medium => 0.75,
-            Self::Low => 0.55,
-        }
-    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]

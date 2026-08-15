@@ -1445,35 +1445,6 @@ impl Scene for GameScene {
 
         self.chart.render(ui, &mut self.res, &mut self.bad_notes);
 
-        if self.res.chart_target.is_some() {
-            self.gl.quad_gl.render_pass(
-                self.res
-                    .chart_target
-                    .as_ref()
-                    .map(|it| it.output().render_pass)
-                    .or_else(|| self.res.camera.render_pass()),
-            );
-        }
-
-        let t = tm.real_time();
-        let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
-        if self.res.config.particle {
-            self.res.emitter.draw(dt);
-        }
-        self.ui(ui, tm)?;
-        self.overlay_ui(ui, tm)?;
-        if self.mode == GameMode::TweakOffset {
-            push_camera_state();
-            self.gl.quad_gl.viewport(None);
-            set_camera(&Camera2D {
-                zoom: vec2(1., -screen_aspect()),
-                render_target: self.res.chart_target.as_ref().map(|it| it.output()).or(self.res.camera.render_target),
-                ..Default::default()
-            });
-            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
-            pop_camera_state();
-        }
-
         if !self.res.no_effect && !self.effects.is_empty() {
             push_camera_state();
             set_camera(&Camera2D {
@@ -1487,6 +1458,29 @@ impl Scene for GameScene {
         }
         if msaa || !self.res.no_effect {
             self.blit_chart_target(ui, asp);
+        }
+
+        self.gl.quad_gl.render_pass(self.res.camera.render_target.map(|it| it.render_pass));
+        self.gl.quad_gl.viewport(self.res.camera.viewport);
+        set_camera(&self.res.camera);
+
+        let t = tm.real_time();
+        let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
+        if self.res.config.particle {
+            self.res.emitter.draw(dt);
+        }
+        self.ui(ui, tm)?;
+        self.overlay_ui(ui, tm)?;
+        if self.mode == GameMode::TweakOffset {
+            push_camera_state();
+            self.gl.quad_gl.viewport(None);
+            set_camera(&Camera2D {
+                zoom: vec2(1., -screen_aspect()),
+                render_target: self.res.camera.render_target,
+                ..Default::default()
+            });
+            self.tweak_offset(ui, Self::interactive(&self.res, &self.state));
+            pop_camera_state();
         }
 
         Ok(())
