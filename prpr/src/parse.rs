@@ -1,5 +1,5 @@
 //! Chart parsers
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::Cursor;
 
 use crate::{bin::BinaryReader, core::Chart, fs::FileSystem, info::ChartFormat};
@@ -29,6 +29,10 @@ pub struct ParseOptions {
     pub use_rpe_170_speed: bool,
 }
 
+pub fn chart_source_text(bytes: &[u8]) -> Result<&str> {
+    std::str::from_utf8(bytes).context("chart is not valid UTF-8")
+}
+
 pub async fn parse_chart_bytes(
     bytes: &[u8],
     format: ChartFormat,
@@ -38,18 +42,9 @@ pub async fn parse_chart_bytes(
 ) -> Result<Chart> {
     tracing::trace!(?format, bytes = bytes.len(), "parse chart bytes");
     match format {
-        ChartFormat::Rpe => {
-            let source = String::from_utf8_lossy(bytes);
-            parse_rpe(&source, fs, extra, options.use_rpe_170_speed).await
-        }
-        ChartFormat::Pgr => {
-            let source = String::from_utf8_lossy(bytes);
-            parse_phigros(&source, extra)
-        }
-        ChartFormat::Pec => {
-            let source = String::from_utf8_lossy(bytes);
-            parse_pec(&source, extra)
-        }
+        ChartFormat::Rpe => parse_rpe(chart_source_text(bytes)?, fs, extra, options.use_rpe_170_speed).await,
+        ChartFormat::Pgr => parse_phigros(chart_source_text(bytes)?, extra),
+        ChartFormat::Pec => parse_pec(chart_source_text(bytes)?, extra),
         ChartFormat::Pbc => {
             let mut r = BinaryReader::new(Cursor::new(bytes));
             r.read()
@@ -58,20 +53,11 @@ pub async fn parse_chart_bytes(
 }
 
 pub fn infer_chart_format_bytes(explicit: Option<&ChartFormat>, bytes: &[u8]) -> ChartFormat {
-    explicit.cloned().unwrap_or_else(|| {
-        if let Ok(text) = std::str::from_utf8(bytes) {
-            if text.starts_with('{') {
-                if text.contains("\"META\"") {
-                    ChartFormat::Rpe
-                } else {
-                    ChartFormat::Pgr
-                }
-            } else {
-                ChartFormat::Pec
-            }
-        } else {
-            ChartFormat::Pbc
-        }
+    explicit.cloned().unwrap_or_else(|| match chart_source_text(bytes) {
+        Ok(text) if text.starts_with('{') && text.contains("\"META\"") => ChartFormat::Rpe,
+        Ok(text) if text.starts_with('{') => ChartFormat::Pgr,
+        Ok(_) => ChartFormat::Pec,
+        Err(_) => ChartFormat::Pbc,
     })
 }
 
@@ -157,6 +143,12 @@ mod tests {
         assert_eq!(infer_chart_format_bytes(None, b"0 1 2 3"), ChartFormat::Pec);
         assert_eq!(infer_chart_format_bytes(None, &[0xff, 0x00]), ChartFormat::Pbc);
         assert_eq!(infer_chart_format_bytes(Some(&ChartFormat::Pbc), br#"{"META":{}}"#), ChartFormat::Pbc);
+    }
+
+    #[test]
+    fn chart_source_text_rejects_invalid_utf8() {
+        assert_eq!(chart_source_text(b"{}").unwrap(), "{}");
+        assert!(chart_source_text(&[0xff, 0x00]).is_err());
     }
 
     #[test]
