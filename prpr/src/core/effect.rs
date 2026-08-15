@@ -1,5 +1,5 @@
 use super::{Anim, MSRenderTarget, Resource, Tweenable};
-use crate::ext::{get_viewport, screen_aspect};
+use crate::ext::screen_aspect;
 use anyhow::{anyhow, bail, Result};
 use macroquad::prelude::*;
 use miniquad::UniformType;
@@ -154,13 +154,22 @@ impl Effect {
 
     pub fn render(&self, res: &mut Resource) {
         let aspect_ratio = res.aspect_ratio;
+        let Some(target) = res.effect_target.as_ref().or(res.chart_target.as_ref()) else {
+            return;
+        };
+        let viewport = if self.global {
+            let dim = target.texture_dim();
+            (0, 0, dim.0 as i32, dim.1 as i32)
+        } else {
+            res.mapped_playfield_viewport(target)
+        };
         let Some(target) = res.effect_target.as_mut().or(res.chart_target.as_mut()) else {
             return;
         };
-        self.render_on(target, aspect_ratio);
+        self.render_on(target, aspect_ratio, viewport);
     }
 
-    pub fn render_on(&self, target: &mut MSRenderTarget, aspect_ratio: f32) {
+    pub fn render_on(&self, target: &mut MSRenderTarget, aspect_ratio: f32, viewport: (i32, i32, i32, i32)) {
         if !self.time_range.contains(&self.t) {
             return;
         }
@@ -180,9 +189,8 @@ impl Effect {
         let screen_dim = vec2(tex.width(), tex.height());
         self.material.set_uniform("screenSize", screen_dim);
         gl.quad_gl.render_pass(Some(target.output().render_pass));
-
-        let vp = get_viewport();
-        self.material.set_uniform("UVScale", vec2(vp.2 as _, vp.3 as _) / screen_dim);
+        gl.quad_gl.viewport(Some(viewport));
+        self.material.set_uniform("UVScale", vec2(viewport.2 as f32, viewport.3 as f32) / screen_dim);
 
         gl_use_material(self.material);
         let top = 1. / if self.global { screen_aspect() } else { aspect_ratio };

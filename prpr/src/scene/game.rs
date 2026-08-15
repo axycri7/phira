@@ -325,8 +325,14 @@ impl GameScene {
         let Some(target) = self.res.effect_target.as_ref().or(self.res.chart_target.as_ref()) else {
             return;
         };
-        self.gl.quad_gl.render_pass(Some(target.output().render_pass));
-        self.gl.quad_gl.viewport(Some(target.map_viewport(vp)));
+        let mapped = target.map_viewport(vp);
+        set_camera(&Camera2D {
+            zoom: self.res.camera.zoom,
+            target: self.res.camera.target,
+            viewport: Some(mapped),
+            render_target: Some(target.output()),
+            ..Default::default()
+        });
     }
 
     fn bind_chart_target(&mut self, ui: &Ui) {
@@ -334,8 +340,14 @@ impl GameScene {
         let Some(target) = self.res.chart_target.as_ref() else {
             return;
         };
-        self.gl.quad_gl.render_pass(Some(target.output().render_pass));
-        self.gl.quad_gl.viewport(Some(target.map_viewport(vp)));
+        let mapped = target.map_viewport(vp);
+        set_camera(&Camera2D {
+            zoom: self.res.camera.zoom,
+            target: self.res.camera.target,
+            viewport: Some(mapped),
+            render_target: Some(target.output()),
+            ..Default::default()
+        });
     }
 
     fn draw_dimmed_background(background: Texture2D, ui: &Ui, dim: f32) {
@@ -1503,7 +1515,6 @@ impl Scene for GameScene {
 
         if !self.res.no_effect {
             self.bind_effect_target(ui);
-            set_camera(&self.res.camera);
             self.chart.render_effects(&mut self.res);
         }
 
@@ -1525,13 +1536,18 @@ impl Scene for GameScene {
                 Self::copy_ms_target(effect, chart);
             }
             self.bind_chart_target(ui);
-            set_camera(&self.res.camera);
             let y_flip = Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.));
             if let Some(fxaa) = self.fxaa.as_ref() {
+                let viewport = self
+                    .res
+                    .chart_target
+                    .as_ref()
+                    .map(|target| self.res.mapped_playfield_viewport(target))
+                    .unwrap_or(self.playfield_vp(ui));
                 self.res.apply_model_of(&y_flip, |res| {
                     let aspect = res.aspect_ratio;
                     if let Some(target) = res.chart_target.as_mut() {
-                        fxaa.render_on(target, aspect);
+                        fxaa.render_on(target, aspect, viewport);
                     }
                 });
             }

@@ -617,6 +617,12 @@ impl Resource {
         true
     }
 
+    pub fn mapped_playfield_viewport(&self, target: &MSRenderTarget) -> (i32, i32, i32, i32) {
+        let cam = self.camera.viewport.unwrap_or(self.last_vp);
+        let rel = (cam.0 - self.last_vp.0, cam.1 - self.last_vp.1, cam.2, cam.3);
+        target.map_viewport(rel)
+    }
+
     pub fn world_to_screen(&self, pt: Point) -> Point {
         self.model_stack.last().unwrap().transform_point(&pt)
     }
