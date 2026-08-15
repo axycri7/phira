@@ -1,4 +1,4 @@
-use super::{chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
+use super::{chart::ChartSettings, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
 pub use crate::{
     config::Mods,
     judge::{HitSound, JudgeStatus, LIMIT_BAD},
@@ -192,7 +192,7 @@ impl Note {
         self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
     }
 
-    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, _bpm_list: &mut BpmList) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(self.kind, NoteKind::Hold { .. }) {
             return;
         }

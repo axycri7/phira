@@ -233,7 +233,6 @@ impl JudgeLine {
         &self,
         ui: &mut Ui,
         res: &mut Resource,
-        _lines: &[JudgeLine],
         bpm_list: &mut BpmList,
         settings: &ChartSettings,
         id: usize,
@@ -429,7 +428,7 @@ impl JudgeLine {
             let height_below = -p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) * res.aspect_ratio;
             let agg = res.config.aggressive;
             for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
-                note.render(res, &mut config, bpm_list);
+                note.render(res, &mut config);
             }
             for group in &self.cache.above_groups {
                 let speed = self.notes[group.start].speed;
@@ -438,12 +437,12 @@ impl JudgeLine {
                     if agg && note.height - config.line_height + note.object.translation.1.now() as f64 > limit {
                         break;
                     }
-                    note.render(res, &mut config, bpm_list);
+                    note.render(res, &mut config);
                 }
             }
             res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
                 for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
-                    note.render(res, &mut config, bpm_list);
+                    note.render(res, &mut config);
                 }
                 for group in &self.cache.below_groups {
                     let speed = self.notes[group.start].speed;
@@ -452,7 +451,7 @@ impl JudgeLine {
                         if agg && note.height - config.line_height + note.object.translation.1.now() as f64 > limit {
                             break;
                         }
-                        note.render(res, &mut config, bpm_list);
+                        note.render(res, &mut config);
                     }
                 }
             });
@@ -463,7 +462,7 @@ impl JudgeLine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::NoteKind;
+    use crate::core::{AnimFloat, AnimVector, Keyframe, NoteKind};
     use crate::judge::{HitSound, JudgeStatus};
 
     fn note(height: f64, speed: f64, above: bool, plain: bool) -> Note {
@@ -472,7 +471,7 @@ mod tests {
                 translation: if plain {
                     Default::default()
                 } else {
-                    AnimVector(AnimFloat::default(), AnimFloat::fixed(1.0))
+                    AnimVector(AnimFloat::default(), AnimFloat::new(vec![Keyframe::new(0., 0., 0), Keyframe::new(1., 1., 0)]))
                 },
                 ..Default::default()
             },

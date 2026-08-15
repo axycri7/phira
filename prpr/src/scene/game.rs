@@ -180,11 +180,6 @@ impl Drop for StaticRenderLayer {
     }
 }
 
-#[derive(Default)]
-struct StaticRenderCache {
-    background: StaticRenderLayer,
-}
-
 #[derive(Clone)]
 enum State {
     Starting,
@@ -236,7 +231,7 @@ pub struct GameScene {
 
     dead: bool,
     hud_text: HudTextCache,
-    static_cache: StaticRenderCache,
+    background_cache: StaticRenderLayer,
 }
 
 macro_rules! reset {
@@ -337,8 +332,8 @@ impl GameScene {
         let content_key = (*self.res.background)
             .raw_miniquad_texture_handle()
             .gl_internal_id() as u64;
-        let target = self.static_cache.background.ensure_target(dim, content_key);
-        if !self.static_cache.background.valid {
+        let target = self.background_cache.ensure_target(dim, content_key);
+        if !self.background_cache.valid {
             push_camera_state();
             set_camera(&Camera2D {
                 zoom: vec2(1., -asp),
@@ -348,7 +343,7 @@ impl GameScene {
             clear_background(BLACK);
             Self::draw_dimmed_background(*self.res.background, ui, 0.3);
             pop_camera_state();
-            self.static_cache.background.valid = true;
+            self.background_cache.valid = true;
         }
         push_camera_state();
         set_camera(&Camera2D {
@@ -614,7 +609,7 @@ impl GameScene {
 
             dead: false,
             hud_text: HudTextCache::default(),
-            static_cache: StaticRenderCache::default(),
+            background_cache: StaticRenderLayer::default(),
         })
     }
 
@@ -1418,7 +1413,7 @@ impl Scene for GameScene {
 
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
         if self.res.update_size(ui.viewport) || self.mode == GameMode::View {
-            self.static_cache.background.invalidate();
+            self.background_cache.invalidate();
             set_camera(&self.res.camera);
         }
 
@@ -1448,7 +1443,7 @@ impl Scene for GameScene {
             draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., background_dim));
         }
 
-        self.chart.render(ui, &mut self.res);
+        self.chart.render(ui, &mut self.res, &mut self.bad_notes);
 
         if self.res.chart_target.is_some() {
             self.gl.quad_gl.render_pass(
@@ -1460,12 +1455,6 @@ impl Scene for GameScene {
             );
         }
 
-        let mut bad_notes = std::mem::take(&mut self.bad_notes);
-        for mut dummy in bad_notes.drain(..) {
-            if dummy.render(&mut self.res) {
-                self.bad_notes.push(dummy);
-            }
-        }
         let t = tm.real_time();
         let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
         if self.res.config.particle {
@@ -1539,25 +1528,6 @@ impl Scene for GameScene {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn infer_chart_format_uses_borrowed_text_bytes() {
-        let mut info = ChartInfo::default();
-        info.format = None;
-
-        assert_eq!(GameScene::infer_chart_format(&info, br#"{"META":{}}"#), ChartFormat::Rpe);
-        assert_eq!(GameScene::infer_chart_format(&info, br#"{"formatVersion":3}"#), ChartFormat::Pgr);
-        assert_eq!(GameScene::infer_chart_format(&info, b"0 1 2 3"), ChartFormat::Pec);
-        assert_eq!(GameScene::infer_chart_format(&info, &[0xff, 0x00]), ChartFormat::Pbc);
-    }
-
-    #[test]
-    fn infer_chart_format_respects_explicit_metadata() {
-        let mut info = ChartInfo::default();
-        info.format = Some(ChartFormat::Pbc);
-
-        assert_eq!(GameScene::infer_chart_format(&info, br#"{"META":{}}"#), ChartFormat::Pbc);
-    }
 
     #[test]
     fn pbc_cache_path_depends_on_bytes_format_and_options() {

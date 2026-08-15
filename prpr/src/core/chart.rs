@@ -1,4 +1,4 @@
-use super::{BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector};
+use super::{BadNote, BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector};
 use crate::{core::Object, fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
@@ -184,7 +184,11 @@ impl Chart {
         }
     }
 
-    pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
+    fn note_screen_transform(flip_x: bool) -> Matrix {
+        Matrix::identity().append_nonuniform_scaling(&Vector::new(if flip_x { -1. } else { 1. }, -1.))
+    }
+
+    pub fn render(&self, ui: &mut Ui, res: &mut Resource, bad_notes: &mut Vec<BadNote>) {
         res.note_buffer.borrow_mut().begin_frame();
         self.prepare_frame_cache(res);
         #[cfg(feature = "video")]
@@ -200,13 +204,14 @@ impl Chart {
                 video.render(res.time, res.aspect_ratio, WHITE);
             }
         }
-        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if res.config.flip_x() { -1. } else { 1. }, -1.)), |res| {
+        res.apply_model_of(&Self::note_screen_transform(res.config.flip_x()), |res| {
             let mut guard = self.bpm_list.borrow_mut();
             let cache = self.frame_cache.borrow();
             for id in &self.order {
-                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id, cache.transforms[*id], cache.line_heights[*id]);
+                self.lines[*id].render(ui, res, &mut guard, &self.settings, *id, cache.transforms[*id], cache.line_heights[*id]);
             }
             drop(guard);
+            bad_notes.retain(|note| note.render(res));
             res.note_buffer.borrow_mut().flush();
             if res.config.sample_count > 1 {
                 unsafe { get_internal_gl() }.flush();
@@ -227,6 +232,17 @@ impl Chart {
                 }
             }
         });
+    }
+}
+
+fn compose_line_transform(parent: Option<(Vector, f32)>, own_translation: Vector, own_rotation: f32, rot_with_parent: bool) -> (Vector, f32) {
+    if let Some((parent_position, parent_rotation)) = parent {
+        (
+            parent_position + Rotation2::new(parent_rotation.to_radians()) * own_translation,
+            own_rotation + if rot_with_parent { parent_rotation } else { 0. },
+        )
+    } else {
+        (own_translation, own_rotation)
     }
 }
 
@@ -251,24 +267,67 @@ fn prepare_line_frame_cache(id: usize, lines: &[JudgeLine], res: &Resource, cach
 
     let own_rotation = line.object.rotation.now();
     let own_translation = line.object.now_translation(res);
-    let (position, rotation) = if let Some(parent) = parent.filter(|_| parent_ready) {
-        let parent_rotation = cache.rotations[parent];
-        (
-            cache.positions[parent] + Rotation2::new(parent_rotation.to_radians()) * own_translation,
-            own_rotation
-                + if line.rot_with_parent {
-                    parent_rotation
-                } else {
-                    0.0
-                },
-        )
-    } else {
-        (own_translation, own_rotation)
-    };
+    let parent_transform = parent
+        .filter(|_| parent_ready)
+        .map(|parent| (cache.positions[parent], cache.rotations[parent]));
+    let (position, rotation) = compose_line_transform(parent_transform, own_translation, own_rotation, line.rot_with_parent);
 
     cache.positions[id] = position;
     cache.rotations[id] = rotation;
     cache.transforms[id] = Rotation2::new(rotation.to_radians()).to_homogeneous().append_translation(&position);
     cache.line_heights[id] = line.height.now() as f64;
     cache.states[id] = 2;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Point;
+
+    fn recursive_transform(
+        id: usize,
+        parents: &[Option<usize>],
+        rotations: &[f32],
+        translations: &[Vector],
+        rot_with_parent: &[bool],
+    ) -> (Vector, f32) {
+        let parent = parents[id].map(|parent| recursive_transform(parent, parents, rotations, translations, rot_with_parent));
+        compose_line_transform(parent, translations[id], rotations[id], rot_with_parent[id])
+    }
+
+    fn cached_transforms(parents: &[Option<usize>], rotations: &[f32], translations: &[Vector], rot_with_parent: &[bool]) -> Vec<(Vector, f32)> {
+        let mut output = Vec::with_capacity(parents.len());
+        for id in 0..parents.len() {
+            let parent = parents[id].map(|parent| output[parent]);
+            output.push(compose_line_transform(parent, translations[id], rotations[id], rot_with_parent[id]));
+        }
+        output
+    }
+    #[test]
+    fn frame_cache_matches_recursive_parent_transforms() {
+        let parents = [None, Some(0), Some(1), None];
+        let rotations = [15., -35., 80., 5.];
+        let translations = [
+            Vector::new(0.2, -0.1),
+            Vector::new(-0.3, 0.4),
+            Vector::new(0.6, 0.25),
+            Vector::new(-0.2, -0.5),
+        ];
+        let rot_with_parent = [false, true, false, false];
+        let cached = cached_transforms(&parents, &rotations, &translations, &rot_with_parent);
+
+        for id in 0..parents.len() {
+            let expected = recursive_transform(id, &parents, &rotations, &translations, &rot_with_parent);
+            assert!((cached[id].0 - expected.0).norm() <= 1e-6);
+            assert!((cached[id].1 - expected.1).abs() <= 1e-6);
+        }
+    }
+
+    #[test]
+    fn note_screen_transform_keeps_notes_moving_toward_the_judge_line() {
+        let point = Point::new(0.25, 0.5);
+
+        assert_eq!(Chart::note_screen_transform(false).transform_point(&point), Point::new(0.25, -0.5));
+        assert_eq!(Chart::note_screen_transform(true).transform_point(&point), Point::new(-0.25, -0.5));
+    }
 }
