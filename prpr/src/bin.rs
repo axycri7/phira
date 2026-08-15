@@ -13,7 +13,7 @@
 use crate::{
     core::{
         Anim, AnimVector, BezierTween, BpmList, Chart, ChartExtra, ChartSettings, ClampedTween, CtrlObject, JudgeLine, JudgeLineCache, JudgeLineKind,
-        Keyframe, Note, NoteKind, Object, StaticTween, Tweenable, UIElement,
+        Keyframe, Note, NoteKind, Object, StaticTween, Tweenable, TWEEN_FUNCTIONS, UIElement,
     },
     judge::{HitSound, JudgeStatus},
     parse::process_lines,
@@ -270,10 +270,12 @@ impl<T: BinaryData> BinaryData for Keyframe<T> {
             tween: {
                 let b = r.read::<u8>()?;
                 match b & 0xC0 {
-                    0 => StaticTween::get_rc(b),
-                    0x80 => Rc::new(ClampedTween::new(b & 0x7f, r.read()?..r.read()?)),
+                    0 if (b as usize) < TWEEN_FUNCTIONS.len() => StaticTween::get_rc(b),
+                    0 => bail!("invalid static tween id: {b}"),
+                    0x80 if ((b & 0x7f) as usize) < TWEEN_FUNCTIONS.len() => Rc::new(ClampedTween::new(b & 0x7f, r.read()?..r.read()?)),
+                    0x80 => bail!("invalid clamped tween id: {}", b & 0x7f),
                     0xC0 => Rc::new(BezierTween::new((r.read()?, r.read()?), (r.read()?, r.read()?))),
-                    _ => panic!("invalid tween"),
+                    _ => bail!("invalid tween tag: {b:#04x}"),
                 }
             },
         })
@@ -295,6 +297,8 @@ impl<T: BinaryData> BinaryData for Keyframe<T> {
             w.write_val(t.p1.1)?;
             w.write_val(t.p2.0)?;
             w.write_val(t.p2.1)?;
+        } else {
+            bail!("unsupported tween type in PBC keyframe");
         }
         Ok(())
     }
