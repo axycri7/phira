@@ -1,5 +1,5 @@
 use super::{BadNote, BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector};
-use crate::{core::Object, fs::FileSystem, judge::JudgeStatus, ui::Ui};
+use crate::{core::Object, ext::SafeTexture, fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use nalgebra::Rotation2;
@@ -139,7 +139,13 @@ impl Chart {
     pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
         for line in &mut self.lines {
             if let JudgeLineKind::Texture(tex, path) = &mut line.kind {
-                *tex = image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?.into();
+                if tex.width() > 1. && tex.height() > 1. {
+                    continue;
+                }
+                *tex = SafeTexture::from(
+                    image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?,
+                )
+                .with_mipmap();
             }
         }
         Ok(())

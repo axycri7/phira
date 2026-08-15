@@ -769,7 +769,7 @@ async fn parse_judge_line(
                     .map(|frame| -> (u128, SafeTexture) {
                         let frame = frame.unwrap();
                         let delay: Duration = frame.delay().into();
-                        (delay.as_millis(), SafeTexture::from(DynamicImage::ImageRgba8(frame.into_buffer())))
+                        (delay.as_millis(), SafeTexture::from(DynamicImage::ImageRgba8(frame.into_buffer())).with_mipmap())
                     })
                     .collect(),
                 );
