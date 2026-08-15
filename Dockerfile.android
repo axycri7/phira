@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Android SDK command-line tools
 RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
-    curl -fL -o /tmp/cmdline-tools.zip \
+    curl --no-alpn -fL --retry 5 --retry-all-errors -o /tmp/cmdline-tools.zip \
         "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" && \
     unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extract && \
     mv /tmp/cmdline-tools-extract/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
@@ -41,16 +41,20 @@ RUN yes | sdkmanager --licenses > /dev/null 2>&1 && \
     sdkmanager "build-tools;33.0.2" "platforms;android-${ANDROID_API}"
 
 # Android NDK
-RUN curl -fL -o /tmp/ndk.zip \
+RUN curl --no-alpn -fL --retry 5 --retry-all-errors -o /tmp/ndk.zip \
         "https://dl.google.com/android/repository/android-ndk-${ANDROID_NDK_VERSION}-linux.zip" && \
     unzip -q /tmp/ndk.zip -d /opt && \
     rm /tmp/ndk.zip
 
-# Rust + cargo-ndk
-RUN curl -fsSL https://sh.rustup.rs | \
-    sh -s -- -y --no-modify-path \
+# Download rustup separately so a failed HTTPS transfer cannot be hidden by a
+# shell pipeline.  The Docker amd64 network currently has an HTTP/2 ALPN
+# handshake failure against static.rust-lang.org; forcing HTTP/1.x avoids it.
+RUN curl --no-alpn -fL --retry 5 --retry-all-errors \
+        -o /tmp/rustup-init.sh https://sh.rustup.rs && \
+    sh /tmp/rustup-init.sh -y --no-modify-path \
         --default-toolchain none \
         --profile minimal && \
+    rm /tmp/rustup-init.sh && \
     rustup toolchain install ${RUST_TOOLCHAIN} \
         --profile minimal \
         --component rustfmt \
@@ -64,7 +68,7 @@ WORKDIR /src
 # Uses the latest release so this stays current without manual version bumps.
 RUN for target in ${ANDROID_TARGETS}; do \
         mkdir -p "/ffmpeg-libs/${target}" && \
-        curl -fL --retry 3 \
+        curl --no-alpn -fL --retry 5 --retry-all-errors \
             -o /tmp/ffmpeg.tar.gz \
             "https://github.com/TeamFlos/prpr-avc-ffmpeg/releases/latest/download/${target}.tar.gz" && \
         tar -xzf /tmp/ffmpeg.tar.gz -C "/ffmpeg-libs/${target}" && \
@@ -80,7 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # apktool (latest stable jar + wrapper)
-RUN curl -fsSL -o /usr/local/bin/apktool.jar \
+RUN curl --no-alpn -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/apktool.jar \
         "https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar" && \
     printf '#!/bin/sh\nexec java -jar /usr/local/bin/apktool.jar "$@"\n' \
         > /usr/local/bin/apktool && \

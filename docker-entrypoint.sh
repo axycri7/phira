@@ -53,17 +53,26 @@ if [[ "${SIGN_APK:-0}" == "1" ]]; then
             armv7-linux-androideabi) APK_ARCH="armeabi-v7a" ;;
             *)                      APK_ARCH="arm64-v8a" ;;
         esac
-        LATEST_APK_URL=$(curl -fsSL "https://api.github.com/repos/TeamFlos/phira/releases/latest" \
-            | jq -r --arg arch "${APK_ARCH}" '
-                first(
-                    .assets[]
-                    | select(.browser_download_url | test($arch + "\\.apk$"))
-                    | .browser_download_url
-                ) // empty
-            ')
+        RELEASE_JSON=$(mktemp)
+        APK_TMP="${APK_INPUT}.tmp"
+        trap 'rm -f "${RELEASE_JSON}" "${APK_TMP}"' EXIT
+        curl --no-alpn -fsSL --retry 5 --retry-all-errors \
+            -o "${RELEASE_JSON}" \
+            "https://api.github.com/repos/TeamFlos/phira/releases/latest"
+        LATEST_APK_URL=$(jq -r --arg arch "${APK_ARCH}" '
+            first(
+                .assets[]
+                | select(.name | test("^Phira-android-" + $arch + "-.*[.]apk$"))
+                | .browser_download_url
+            ) // empty
+        ' "${RELEASE_JSON}")
+        rm -f "${RELEASE_JSON}"
         [[ -n "${LATEST_APK_URL}" ]] || { echo "ERROR: could not find ${APK_ARCH} APK in latest release"; exit 1; }
         echo "    URL: ${LATEST_APK_URL}"
-        curl -fL --retry 3 -o "${APK_INPUT}" "${LATEST_APK_URL}"
+        curl --no-alpn -fL --retry 5 --retry-all-errors \
+            -o "${APK_TMP}" "${LATEST_APK_URL}"
+        mv "${APK_TMP}" "${APK_INPUT}"
+        trap - EXIT
         echo "=== Downloaded to ${APK_INPUT} ==="
     fi
 

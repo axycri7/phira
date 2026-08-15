@@ -411,6 +411,6 @@ impl TextPainter {
 
 impl Drop for TextPainter {
     fn drop(&mut self) {
-        self.cache_texture.delete();
+        crate::ext::queue_texture_deletion(self.cache_texture);
     }
 }
