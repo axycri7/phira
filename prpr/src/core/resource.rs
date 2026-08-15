@@ -296,12 +296,47 @@ impl ResourcePack {
     }
 }
 
+const HIT_FX_MAX_PER_POS: usize = 4;
+const HIT_FX_POS_BINS: f32 = 50.;
+
+#[derive(Default)]
+struct HitFxSlots {
+    time: f32,
+    active: Vec<((i16, i16), f32)>,
+}
+
+impl HitFxSlots {
+    fn key(pt: Vec2) -> (i16, i16) {
+        ((pt.x * HIT_FX_POS_BINS).round() as i16, (pt.y * HIT_FX_POS_BINS).round() as i16)
+    }
+
+    fn tick(&mut self, dt: f32) {
+        self.time += dt;
+        let now = self.time;
+        self.active.retain(|(_, expire)| *expire > now);
+    }
+
+    fn try_occupy(&mut self, pt: Vec2, lifetime: f32) -> bool {
+        let now = self.time;
+        self.active.retain(|(_, expire)| *expire > now);
+        let key = Self::key(pt);
+        if self.active.iter().filter(|(pos, _)| *pos == key).count() >= HIT_FX_MAX_PER_POS {
+            return false;
+        }
+        self.active.push((key, now + lifetime.max(0.)));
+        true
+    }
+}
+
+
 pub struct ParticleEmitter {
     pub scale: f32,
     pub emitter: Emitter,
     pub emitter_square: Emitter,
     pub hide_particles: bool,
+    slots: HitFxSlots,
 }
+
 
 impl ParticleEmitter {
     pub fn new(res_pack: &ResourcePack, scale: f32, hide_particles: bool) -> Result<Self> {
@@ -342,12 +377,16 @@ impl ParticleEmitter {
                 ..Default::default()
             }),
             hide_particles,
+            slots: HitFxSlots::default(),
         };
         res.set_scale(scale);
         Ok(res)
     }
 
     pub fn emit_at(&mut self, pt: Vec2, rotation: f32, color: Color) {
+        if !self.slots.try_occupy(pt, self.emitter.config.lifetime) {
+            return;
+        }
         self.emitter.config.initial_rotation = rotation;
         self.emitter.config.base_color = color;
         self.emitter.emit(pt, 1);
@@ -358,9 +397,11 @@ impl ParticleEmitter {
     }
 
     pub fn draw(&mut self, dt: f32) {
+        self.slots.tick(dt);
         self.emitter.draw(vec2(0., 0.), dt);
         self.emitter_square.draw(vec2(0., 0.), dt);
     }
+
 
     pub fn set_scale(&mut self, scale: f32) {
         self.emitter.config.size = self.scale * scale / 5.;
@@ -651,3 +692,33 @@ impl Resource {
         unsafe { get_internal_gl() }.quad_gl.pop_model_matrix();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{HitFxSlots, HIT_FX_MAX_PER_POS};
+    use macroquad::math::vec2;
+
+    #[test]
+    fn hit_fx_rejects_fifth_at_same_spot() {
+        let mut slots = HitFxSlots::default();
+        let pt = vec2(0.2, -0.1);
+        for _ in 0..HIT_FX_MAX_PER_POS {
+            assert!(slots.try_occupy(pt, 0.5));
+        }
+        assert!(!slots.try_occupy(pt, 0.5));
+        assert!(slots.try_occupy(vec2(0.6, -0.1), 0.5));
+    }
+
+    #[test]
+    fn hit_fx_allows_new_after_lifetime() {
+        let mut slots = HitFxSlots::default();
+        let pt = vec2(-0.3, 0.4);
+        for _ in 0..HIT_FX_MAX_PER_POS {
+            assert!(slots.try_occupy(pt, 0.2));
+        }
+        assert!(!slots.try_occupy(pt, 0.2));
+        slots.tick(0.21);
+        assert!(slots.try_occupy(pt, 0.2));
+    }
+}
+
