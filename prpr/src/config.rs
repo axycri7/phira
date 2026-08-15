@@ -72,8 +72,8 @@ impl EffectQuality {
     pub fn effect_render_scale(self) -> f32 {
         match self {
             Self::High => 1.,
-            Self::Medium => 0.75,
-            Self::Low => 0.5,
+            Self::Medium => 0.8,
+            Self::Low => 0.6,
         }
     }
 

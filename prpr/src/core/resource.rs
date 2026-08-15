@@ -408,6 +408,7 @@ pub struct Resource {
     pub extra_sfxs: SfxMap,
 
     pub chart_target: Option<MSRenderTarget>,
+    pub effect_target: Option<MSRenderTarget>,
     pub no_effect: bool,
 
     pub note_buffer: RefCell<NoteBuffer>,
@@ -528,6 +529,7 @@ impl Resource {
             extra_sfxs: SfxMap::new(),
 
             chart_target: None,
+            effect_target: None,
             no_effect,
 
             note_buffer: RefCell::new(NoteBuffer::default()),
@@ -555,36 +557,40 @@ impl Resource {
     }
 
     pub fn update_size(&mut self, vp: (i32, i32, i32, i32)) -> bool {
-        let need_target = !self.no_effect || self.config.sample_count != 1;
-        let scale = if !self.no_effect {
-            self.config.effect_quality.effect_render_scale()
-        } else {
-            1.
-        };
-        let target_dim = (
+        let scale = self.config.effect_quality.effect_render_scale();
+        let need_chart = !self.no_effect || self.config.sample_count != 1 || self.config.fxaa;
+        let need_effect = !self.no_effect && scale < 1.;
+        let chart_dim = (vp.2.max(1) as u32, vp.3.max(1) as u32);
+        let effect_dim = (
             ((vp.2 as f32) * scale).round().max(1.) as u32,
             ((vp.3 as f32) * scale).round().max(1.) as u32,
         );
-        let target_ready = if need_target {
+        let chart_ready = if need_chart {
             self.chart_target
                 .as_ref()
-                .is_some_and(|target| target.texture_dim() == target_dim && target.samples() == self.config.sample_count)
+                .is_some_and(|target| target.texture_dim() == chart_dim && target.samples() == self.config.sample_count)
         } else {
             self.chart_target.is_none()
         };
-        if self.last_vp == vp && target_ready {
+        let effect_ready = if need_effect {
+            self.effect_target.as_ref().is_some_and(|target| target.texture_dim() == effect_dim)
+        } else {
+            self.effect_target.is_none()
+        };
+        if self.last_vp == vp && chart_ready && effect_ready {
             return false;
         }
         self.last_vp = vp;
-        if need_target {
-            self.chart_target = Some(MSRenderTarget::new_scaled(
-                (vp.2 as u32, vp.3 as u32),
-                target_dim,
-                self.config.sample_count,
-            ));
+        self.chart_target = if need_chart {
+            Some(MSRenderTarget::new(chart_dim, self.config.sample_count))
         } else {
-            self.chart_target = None;
-        }
+            None
+        };
+        self.effect_target = if need_effect {
+            Some(MSRenderTarget::new_scaled(chart_dim, effect_dim, 1))
+        } else {
+            None
+        };
         fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
             let w = w as f32;
             let h = h as f32;

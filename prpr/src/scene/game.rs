@@ -10,7 +10,7 @@ use super::{
 use crate::{
     bin::BinaryWriter,
     config::{Config, Mods},
-    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector, PGR_FONT},
+    core::{copy_fbo_filtered, internal_id, BadNote, Chart, ChartExtra, Effect, Matrix, MSRenderTarget, Point, Resource, UIElement, Vector, PGR_FONT},
     ext::{parse_time, screen_aspect, semi_white, source_of_image, RectExt, SafeTexture, ScaleType},
     fs::{ExternalFileSystem, FileSystem},
     info::{ChartFormat, ChartInfo},
@@ -202,6 +202,7 @@ pub struct GameScene {
     chart_format: ChartFormat,
     info_offset: f32,
     effects: Vec<Effect>,
+    fxaa: Option<Effect>,
     offset_analysis: OffsetAnalysisPanel,
 
     first_in: bool,
@@ -270,28 +271,71 @@ impl GameScene {
     }
 
     fn blit_chart_target(&mut self, ui: &Ui, asp: f32) {
-        if let Some(target) = &self.res.chart_target {
-            self.gl.flush();
-            push_camera_state();
-            self.gl.quad_gl.viewport(None);
-            set_camera(&Camera2D {
-                zoom: vec2(1., asp),
-                render_target: self.res.camera.render_target,
-                viewport: Some(ui.viewport),
+        let texture = if self.fxaa.is_some() {
+            self.res.chart_target.as_ref().map(|target| target.output().texture)
+        } else {
+            self.res
+                .effect_target
+                .as_ref()
+                .or(self.res.chart_target.as_ref())
+                .map(|target| target.output().texture)
+        };
+        let Some(texture) = texture else {
+            return;
+        };
+        self.gl.flush();
+        push_camera_state();
+        self.gl.quad_gl.viewport(None);
+        set_camera(&Camera2D {
+            zoom: vec2(1., asp),
+            render_target: self.res.camera.render_target,
+            viewport: Some(ui.viewport),
+            ..Default::default()
+        });
+        draw_texture_ex(
+            texture,
+            -1.,
+            -ui.top,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(2., ui.top * 2.)),
                 ..Default::default()
-            });
-            draw_texture_ex(
-                target.output().texture,
-                -1.,
-                -ui.top,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(vec2(2., ui.top * 2.)),
-                    ..Default::default()
-                },
-            );
-            pop_camera_state();
-        }
+            },
+        );
+        pop_camera_state();
+    }
+
+    fn playfield_vp(&self, ui: &Ui) -> (i32, i32, i32, i32) {
+        let vp = self.res.camera.viewport.unwrap();
+        (vp.0 - ui.viewport.0, vp.1 - ui.viewport.1, vp.2, vp.3)
+    }
+
+    fn copy_ms_target(src: &MSRenderTarget, dst: &MSRenderTarget) {
+        copy_fbo_filtered(
+            internal_id(src.output()),
+            internal_id(dst.output()),
+            src.texture_dim(),
+            dst.texture_dim(),
+            miniquad::gl::GL_LINEAR,
+        );
+    }
+
+    fn bind_effect_target(&mut self, ui: &Ui) {
+        let vp = self.playfield_vp(ui);
+        let Some(target) = self.res.effect_target.as_ref().or(self.res.chart_target.as_ref()) else {
+            return;
+        };
+        self.gl.quad_gl.render_pass(Some(target.output().render_pass));
+        self.gl.quad_gl.viewport(Some(target.map_viewport(vp)));
+    }
+
+    fn bind_chart_target(&mut self, ui: &Ui) {
+        let vp = self.playfield_vp(ui);
+        let Some(target) = self.res.chart_target.as_ref() else {
+            return;
+        };
+        self.gl.quad_gl.render_pass(Some(target.output().render_pass));
+        self.gl.quad_gl.viewport(Some(target.map_viewport(vp)));
     }
 
     fn draw_dimmed_background(background: Texture2D, ui: &Ui, dim: f32) {
@@ -521,12 +565,11 @@ impl GameScene {
             chart.extra.global_effects.clear();
         }
         let effects = std::mem::take(&mut chart.extra.global_effects);
-        if config.fxaa {
-            chart
-                .extra
-                .effects
-                .push(Effect::new(0.0..f64::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false).unwrap());
-        }
+        let fxaa = if config.fxaa {
+            Some(Effect::new(0.0..f64::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false).unwrap())
+        } else {
+            None
+        };
 
         if config.has_mod(Mods::NIGHTCORE) {
             config.speed *= 1.5;
@@ -577,6 +620,7 @@ impl GameScene {
             chart_bytes,
             chart_format,
             effects,
+            fxaa,
             info_offset,
 
             offset_analysis: OffsetAnalysisPanel::new(),
@@ -1346,6 +1390,9 @@ impl Scene for GameScene {
         for e in &mut self.effects {
             e.update(&self.res);
         }
+        if let Some(fxaa) = &mut self.fxaa {
+            fxaa.update(&self.res);
+        }
         if let Some((id, text)) = take_input() {
             let offset = self.offset().min(0.);
             match id.as_str() {
@@ -1445,6 +1492,17 @@ impl Scene for GameScene {
 
         self.chart.render(ui, &mut self.res, &mut self.bad_notes);
 
+        if let (Some(chart), Some(effect)) = (self.res.chart_target.as_ref(), self.res.effect_target.as_ref()) {
+            self.gl.flush();
+            Self::copy_ms_target(chart, effect);
+        }
+
+        if !self.res.no_effect {
+            self.bind_effect_target(ui);
+            set_camera(&self.res.camera);
+            self.chart.render_effects(&mut self.res);
+        }
+
         if !self.res.no_effect && !self.effects.is_empty() {
             push_camera_state();
             set_camera(&Camera2D {
@@ -1456,7 +1514,26 @@ impl Scene for GameScene {
             }
             pop_camera_state();
         }
-        if msaa || !self.res.no_effect {
+
+        if self.fxaa.is_some() {
+            if let (Some(chart), Some(effect)) = (self.res.chart_target.as_ref(), self.res.effect_target.as_ref()) {
+                self.gl.flush();
+                Self::copy_ms_target(effect, chart);
+            }
+            self.bind_chart_target(ui);
+            set_camera(&self.res.camera);
+            let y_flip = Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.));
+            if let Some(fxaa) = self.fxaa.as_ref() {
+                self.res.apply_model_of(&y_flip, |res| {
+                    let aspect = res.aspect_ratio;
+                    if let Some(target) = res.chart_target.as_mut() {
+                        fxaa.render_on(target, aspect);
+                    }
+                });
+            }
+        }
+
+        if msaa || !self.res.no_effect || self.fxaa.is_some() {
             self.blit_chart_target(ui, asp);
         }
 

@@ -1,4 +1,4 @@
-use super::{Anim, Resource, Tweenable};
+use super::{Anim, MSRenderTarget, Resource, Tweenable};
 use crate::ext::{get_viewport, screen_aspect};
 use anyhow::{anyhow, bail, Result};
 use macroquad::prelude::*;
@@ -153,6 +153,14 @@ impl Effect {
     }
 
     pub fn render(&self, res: &mut Resource) {
+        let aspect_ratio = res.aspect_ratio;
+        let Some(target) = res.effect_target.as_mut().or(res.chart_target.as_mut()) else {
+            return;
+        };
+        self.render_on(target, aspect_ratio);
+    }
+
+    pub fn render_on(&self, target: &mut MSRenderTarget, aspect_ratio: f32) {
         if !self.time_range.contains(&self.t) {
             return;
         }
@@ -166,7 +174,6 @@ impl Effect {
             uniform.apply(&self.material);
         }
         self.material.set_uniform("time", self.t as f32);
-        let target = res.chart_target.as_mut().unwrap();
         target.swap();
         let tex = target.old().texture;
         self.material.set_texture("screenTexture", tex);
@@ -178,7 +185,7 @@ impl Effect {
         self.material.set_uniform("UVScale", vec2(vp.2 as _, vp.3 as _) / screen_dim);
 
         gl_use_material(self.material);
-        let top = 1. / if self.global { screen_aspect() } else { res.aspect_ratio };
+        let top = 1. / if self.global { screen_aspect() } else { aspect_ratio };
         draw_rectangle(-1., -top, 2., top * 2., WHITE);
         gl_use_default_material();
     }
