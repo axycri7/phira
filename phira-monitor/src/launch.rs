@@ -25,7 +25,7 @@ pub fn launch_task(id: i32, players: Vec<UserInfo>) -> Result<LaunchTask> {
 
         let mut charts = Vec::with_capacity(players.len());
         for _ in 0..players.len() {
-            charts.push(GameScene::load_chart(fs.as_mut(), &info).await?.0);
+            charts.push(GameScene::load_chart(fs.as_mut(), &info, prpr::config::EffectQuality::High.chart_texture_max_edge()).await?.0);
         }
         let loading_scene = LoadingScene::new(GameMode::View, info, config, fs, None, None, None, None, None).await?;
         let game_scene = loading_scene.load_task.unwrap().await?;

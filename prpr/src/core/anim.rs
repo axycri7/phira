@@ -147,6 +147,17 @@ impl<T: Tweenable> Anim<T> {
     }
 }
 
+impl Anim<f32> {
+    pub fn max_abs(&self) -> f32 {
+        let local = self.keyframes.iter().map(|kf| kf.value.abs()).fold(0.0_f32, f32::max);
+        match &self.next {
+            Some(next) => local + next.max_abs(),
+            None => local,
+        }
+    }
+}
+
+
 impl<T: Tweenable + Default> Anim<T> {
     pub fn now(&self) -> T {
         self.now_opt().unwrap_or_default()
@@ -195,6 +206,15 @@ mod tests {
         assert_eq!(anim.now_opt(), None);
         assert!(anim.is_default());
     }
+
+    #[test]
+    fn max_abs_uses_keyframe_peaks_and_chains() {
+        let mut anim = AnimFloat::new(vec![Keyframe::new(0.0, -0.25, 2), Keyframe::new(1.0, 0.8, 0)]);
+        anim.next = Some(Box::new(AnimFloat::fixed(0.1)));
+        assert!((anim.max_abs() - 0.9).abs() < 1e-6);
+        assert_eq!(AnimFloat::default().max_abs(), 0.0);
+    }
+
 
     #[test]
     fn chained_now_opt_skips_default_segments() {

@@ -506,7 +506,7 @@ impl GameScene {
         }
     }
 
-    pub async fn load_chart(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<(Chart, Vec<u8>, ChartFormat)> {
+    pub async fn load_chart(fs: &mut dyn FileSystem, info: &ChartInfo, max_texture_edge: u32) -> Result<(Chart, Vec<u8>, ChartFormat)> {
         let extra_source = fs.load_file("extra.json").await.ok().map(String::from_utf8).transpose()?;
         let extra = if let Some(extra) = extra_source.as_deref() {
             parse_extra(extra, fs).await.context("Failed to parse extra")?
@@ -547,7 +547,7 @@ impl GameScene {
         if format == ChartFormat::Pbc {
             Self::load_custom_hitsounds(&mut chart, fs).await?;
         }
-        chart.load_textures(fs).await?;
+        chart.load_textures(fs, max_texture_edge).await?;
         chart.settings.hold_partial_cover = info.hold_partial_cover;
         Ok((chart, bytes, format))
     }
@@ -575,7 +575,7 @@ impl GameScene {
             _ => {}
         }
 
-        let (mut chart, chart_bytes, chart_format) = Self::load_chart(fs.deref_mut(), &info).await?;
+        let (mut chart, chart_bytes, chart_format) = Self::load_chart(fs.deref_mut(), &info, config.effect_quality.chart_texture_max_edge()).await?;
         if config.mods.contains(Mods::NO_SHADER) {
             chart.extra.effects.clear();
             chart.extra.global_effects.clear();

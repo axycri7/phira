@@ -105,10 +105,14 @@ pub fn queue_texture_deletion(texture: Texture2D) {
     PENDING_TEXTURE_DELETIONS.lock().unwrap().push(texture);
 }
 
-struct SafeTextureInner(Texture2D);
+struct SafeTextureInner {
+    tex: Texture2D,
+    logical_w: f32,
+    logical_h: f32,
+}
 impl Drop for SafeTextureInner {
     fn drop(&mut self) {
-        queue_texture_deletion(self.0);
+        queue_texture_deletion(self.tex);
     }
 }
 
@@ -116,13 +120,29 @@ pub struct SafeTexture(Arc<SafeTextureInner>);
 impl SafeTexture {
     pub fn into_inner(self) -> Texture2D {
         let arc = self.0;
-        let res = arc.0;
+        let res = arc.tex;
         std::mem::forget(arc);
         res
     }
 
+    pub fn logical_size(&self) -> Vec2 {
+        vec2(self.0.logical_w, self.0.logical_h)
+    }
+
+    pub fn from_chart_image(image: DynamicImage, target_w: u32, target_h: u32) -> Self {
+        let logical_w = image.width() as f32;
+        let logical_h = image.height() as f32;
+        let image = resize_chart_image(image, target_w, target_h);
+        Self(Arc::new(SafeTextureInner {
+            tex: Texture2D::from_rgba8(image.width() as _, image.height() as _, &image.into_rgba8()),
+            logical_w,
+            logical_h,
+        }))
+        .with_mipmap()
+    }
+
     pub fn with_mipmap(self) -> Self {
-        let id = self.0 .0.raw_miniquad_texture_handle().gl_internal_id();
+        let id = self.0.tex.raw_miniquad_texture_handle().gl_internal_id();
         unsafe {
             use miniquad::gl::*;
             glBindTexture(GL_TEXTURE_2D, id);
@@ -133,7 +153,7 @@ impl SafeTexture {
     }
 
     pub fn with_filter(self, filter: GLenum) -> Self {
-        let id = self.0 .0.raw_miniquad_texture_handle().gl_internal_id();
+        let id = self.0.tex.raw_miniquad_texture_handle().gl_internal_id();
         unsafe {
             use miniquad::gl::*;
             glBindTexture(GL_TEXTURE_2D, id);
@@ -141,6 +161,26 @@ impl SafeTexture {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter as _);
         }
         self
+    }
+}
+
+pub fn chart_texture_gpu_size(orig_w: u32, orig_h: u32, need_w: f32, need_h: f32, max_edge: u32) -> (u32, u32) {
+    let orig_w = orig_w as f32;
+    let orig_h = orig_h as f32;
+    let max_edge = max_edge.max(1) as f32;
+    let w = orig_w.min(need_w.max(1.)).min(max_edge);
+    let h = orig_h.min(need_h.max(1.)).min(max_edge);
+    let scale = (w / orig_w).min(h / orig_h).min(1.);
+    ((orig_w * scale).round().max(1.) as u32, (orig_h * scale).round().max(1.) as u32)
+}
+
+pub fn resize_chart_image(image: DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
+    let tw = target_w.max(1).min(image.width());
+    let th = target_h.max(1).min(image.height());
+    if tw == image.width() && th == image.height() {
+        image
+    } else {
+        image.resize_exact(tw, th, image::imageops::FilterType::Triangle)
     }
 }
 
@@ -154,7 +194,7 @@ impl Deref for SafeTexture {
     type Target = Texture2D;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.as_ref().0
+        &self.0.tex
     }
 }
 
@@ -167,13 +207,21 @@ impl Eq for SafeTexture {}
 
 impl From<Texture2D> for SafeTexture {
     fn from(tex: Texture2D) -> Self {
-        Self(Arc::new(SafeTextureInner(tex)))
+        let logical_w = tex.width();
+        let logical_h = tex.height();
+        Self(Arc::new(SafeTextureInner { tex, logical_w, logical_h }))
     }
 }
 
 impl From<DynamicImage> for SafeTexture {
     fn from(image: DynamicImage) -> Self {
-        Texture2D::from_rgba8(image.width() as _, image.height() as _, &image.into_rgba8()).into()
+        let logical_w = image.width() as f32;
+        let logical_h = image.height() as f32;
+        Self(Arc::new(SafeTextureInner {
+            tex: Texture2D::from_rgba8(image.width() as _, image.height() as _, &image.into_rgba8()),
+            logical_w,
+            logical_h,
+        }))
     }
 }
 
@@ -621,3 +669,24 @@ void main() {
     gl_FragColor = color * texture2D(Texture, uv);
 }"#;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{chart_texture_gpu_size, resize_chart_image};
+    use image::DynamicImage;
+
+    #[test]
+    fn chart_texture_gpu_size_follows_min_of_need_original_and_cap() {
+        assert_eq!(chart_texture_gpu_size(8000, 2000, 800., 200., 4096), (800, 200));
+        assert_eq!(chart_texture_gpu_size(8000, 2000, 3000., 750., 2048), (2048, 512));
+        assert_eq!(chart_texture_gpu_size(800, 200, 2000., 500., 4096), (800, 200));
+    }
+
+    #[test]
+    fn resize_chart_image_never_upsamples() {
+        let image = DynamicImage::new_rgba8(800, 200);
+        let out = resize_chart_image(image, 1600, 400);
+        assert_eq!((out.width(), out.height()), (800, 200));
+    }
+}
+

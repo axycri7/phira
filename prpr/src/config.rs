@@ -77,6 +77,14 @@ impl EffectQuality {
         }
     }
 
+    pub fn chart_texture_max_edge(self) -> u32 {
+        match self {
+            Self::High => 4096,
+            Self::Medium => 2048,
+            Self::Low => 1536,
+        }
+    }
+
 }
 
 #[derive(Clone, Deserialize, Serialize)]

@@ -1,5 +1,12 @@
-use super::{BadNote, BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector};
-use crate::{core::Object, ext::SafeTexture, fs::FileSystem, judge::JudgeStatus, ui::Ui};
+use super::{AnimFloat, AnimVector, BadNote, BpmList, Effect, GifFrames, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector};
+use crate::{
+    core::Object,
+    ext::{chart_texture_gpu_size, SafeTexture},
+    fs::FileSystem,
+    judge::JudgeStatus,
+    ui::Ui,
+};
+
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use nalgebra::Rotation2;
@@ -136,20 +143,48 @@ impl Chart {
         }
     }
 
-    pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
+    pub async fn load_textures(&mut self, fs: &mut dyn FileSystem, max_edge: u32) -> Result<()> {
+        let playfield = texture_playfield_px();
+        let mut png_need: HashMap<String, (f32, f32)> = HashMap::new();
+        let mut gif_need: HashMap<String, (f32, f32)> = HashMap::new();
+        for line in &self.lines {
+            match &line.kind {
+                JudgeLineKind::Texture(_, path) => merge_texture_need(&mut png_need, path, &line.object.scale, playfield),
+                JudgeLineKind::TextureGif(_, _, path) => merge_texture_need(&mut gif_need, path, &line.object.scale, playfield),
+                _ => {}
+            }
+        }
+
+        let mut pngs = HashMap::new();
+        for (path, (fx, fy)) in png_need {
+            let image = image::load_from_memory(&fs.load_file(&path).await.with_context(|| format!("failed to load illustration {path}"))?)?;
+            let (tw, th) = chart_texture_gpu_size(image.width(), image.height(), image.width() as f32 * fx, image.height() as f32 * fy, max_edge);
+            pngs.insert(path, SafeTexture::from_chart_image(image, tw, th));
+        }
+        let mut gifs = HashMap::new();
+        for (path, (fx, fy)) in gif_need {
+            let data = fs.load_file(&path).await.with_context(|| format!("failed to load illustration {path}"))?;
+            gifs.insert(path, decode_gif_frames(&data, fx, fy, max_edge)?);
+        }
+
         for line in &mut self.lines {
-            if let JudgeLineKind::Texture(tex, path) = &mut line.kind {
-                if tex.width() > 1. && tex.height() > 1. {
-                    continue;
+            match &mut line.kind {
+                JudgeLineKind::Texture(tex, path) => {
+                    if let Some(loaded) = pngs.get(path) {
+                        *tex = loaded.clone();
+                    }
                 }
-                *tex = SafeTexture::from(
-                    image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?,
-                )
-                .with_mipmap();
+                JudgeLineKind::TextureGif(_, frames, path) => {
+                    if let Some(loaded) = gifs.get(path) {
+                        *frames = loaded.clone();
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
     }
+
 
     pub fn reset(&mut self) {
         self.lines
@@ -284,6 +319,52 @@ fn prepare_line_frame_cache(id: usize, lines: &[JudgeLine], res: &Resource, cach
     cache.states[id] = 2;
 }
 
+fn texture_playfield_px() -> (f32, f32) {
+    let w = screen_width();
+    let h = screen_height();
+    if w > 1. && h > 1. {
+        (w, h)
+    } else {
+        (2560., 1440.)
+    }
+}
+
+fn axis_max_scale(anim: &AnimFloat) -> f32 {
+    if anim.is_default() {
+        1.0
+    } else {
+        anim.max_abs().max(1e-6)
+    }
+}
+
+fn merge_texture_need(needs: &mut HashMap<String, (f32, f32)>, path: &str, scale: &AnimVector, playfield: (f32, f32)) {
+    let fx = axis_max_scale(&scale.0) * playfield.0 / 2.;
+    let fy = axis_max_scale(&scale.1) * playfield.1 / 2.;
+    let entry = needs.entry(path.to_owned()).or_insert((0., 0.));
+    entry.0 = entry.0.max(fx);
+    entry.1 = entry.1.max(fy);
+}
+
+fn decode_gif_frames(data: &[u8], fx: f32, fy: f32, max_edge: u32) -> Result<GifFrames> {
+    use image::{codecs::gif::GifDecoder, AnimationDecoder};
+    use std::io::Cursor;
+    use std::time::Duration;
+
+    let decoder = GifDecoder::new(Cursor::new(data))?;
+    let frames = decoder
+        .into_frames()
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|frame| {
+            let delay: Duration = frame.delay().into();
+            let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
+            let (tw, th) = chart_texture_gpu_size(image.width(), image.height(), image.width() as f32 * fx, image.height() as f32 * fy, max_edge);
+            (delay.as_millis(), SafeTexture::from_chart_image(image, tw, th))
+        })
+        .collect();
+    Ok(GifFrames::new(frames))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,4 +416,18 @@ mod tests {
         assert_eq!(Chart::note_screen_transform(false).transform_point(&point), Point::new(0.25, -0.5));
         assert_eq!(Chart::note_screen_transform(true).transform_point(&point), Point::new(-0.25, -0.5));
     }
+
+    #[test]
+    fn texture_need_tracks_max_scale_across_lines() {
+        let mut needs = HashMap::new();
+        let playfield = (crate::parse::RPE_WIDTH, crate::parse::RPE_HEIGHT);
+        let small = AnimVector(AnimFloat::fixed(2. / crate::parse::RPE_WIDTH * 0.05), AnimFloat::fixed(2. / crate::parse::RPE_WIDTH * 0.05));
+        let large = AnimVector(AnimFloat::fixed(2. / crate::parse::RPE_WIDTH * 0.1), AnimFloat::fixed(2. / crate::parse::RPE_WIDTH * 0.2));
+        merge_texture_need(&mut needs, "a.png", &small, playfield);
+        merge_texture_need(&mut needs, "a.png", &large, playfield);
+        let (fx, fy) = needs["a.png"];
+        assert!((fx - 0.1).abs() < 1e-5);
+        assert!((fy - 0.2 * crate::parse::RPE_HEIGHT / crate::parse::RPE_WIDTH).abs() < 1e-5);
+    }
+
 }

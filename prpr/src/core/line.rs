@@ -38,12 +38,14 @@ impl UIElement {
     }
 }
 
+#[derive(Clone)]
 pub struct GifFrames {
     /// time of each frame in milliseconds
     frames: Vec<(u128, SafeTexture)>,
     /// milliseconds
     total_time: u128,
 }
+
 
 impl GifFrames {
     pub fn new(frames: Vec<(u128, SafeTexture)>) -> Self {
@@ -266,7 +268,7 @@ impl JudgeLine {
                         if color.a <= 0.001 {
                             return;
                         }
-                        let hf = vec2(texture.width(), texture.height());
+                        let hf = texture.logical_size();
                         draw_texture_ex(
                             **texture,
                             -hf.x / 2.,
@@ -287,7 +289,7 @@ impl JudgeLine {
                         if color.a <= 0.001 {
                             return;
                         }
-                        let hf = vec2(frame.width(), frame.height());
+                        let hf = frame.logical_size();
                         draw_texture_ex(
                             **frame,
                             -hf.x / 2.,
