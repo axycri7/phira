@@ -700,31 +700,38 @@ impl Judge {
             };
             let note = &mut chart.lines[line_id].notes[id as usize];
             let dt = (t - note.time).abs() / spd;
-            if dt <= if matches!(note.kind, NoteKind::Click) { LIMIT_BAD } else { LIMIT_GOOD } {
-                match note.kind {
-                    NoteKind::Click => {
-                        note.judge = JudgeStatus::Judged;
-                        judgements.push((
-                            if dt <= LIMIT_PERFECT {
-                                Judgement::Perfect
-                            } else if dt <= LIMIT_GOOD {
-                                Judgement::Good
-                            } else {
-                                Judgement::Bad
-                            },
-                            line_id,
-                            id,
-                            None,
-                        ));
-                    }
-                    NoteKind::Hold { .. } => {
-                        note.hitsound.play(res);
-                        self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
-                        note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f64::INFINITY);
-                    }
-                    _ => unreachable!(),
-                };
+            if dt
+                > if matches!(note.kind, NoteKind::Click) {
+                    LIMIT_BAD
+                } else {
+                    LIMIT_GOOD
+                }
+            {
+                break;
             }
+            match note.kind {
+                NoteKind::Click => {
+                    note.judge = JudgeStatus::Judged;
+                    judgements.push((
+                        if dt <= LIMIT_PERFECT {
+                            Judgement::Perfect
+                        } else if dt <= LIMIT_GOOD {
+                            Judgement::Good
+                        } else {
+                            Judgement::Bad
+                        },
+                        line_id,
+                        id,
+                        None,
+                    ));
+                }
+                NoteKind::Hold { .. } => {
+                    note.hitsound.play(res);
+                    self.judgements.borrow_mut().push((t, line_id as _, id, Err(dt <= LIMIT_PERFECT)));
+                    note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f64::INFINITY);
+                }
+                _ => unreachable!(),
+            };
             let line = &chart.lines[line_id];
             let (idx, st) = &self.notes[line_id];
             let mut ptr = keyboard_ptrs[line_id].max(*st);
